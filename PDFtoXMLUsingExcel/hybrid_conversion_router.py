@@ -1,0 +1,803 @@
+#!/usr/bin/env python3
+"""
+Hybrid Conversion Router for PDF to XML Conversion
+
+This module routes PDF pages between AI and non-AI conversion pipelines
+based on page complexity analysis. Complex pages (with tables, images,
+complex layouts) go to the AI pipeline for better accuracy, while simple
+text-only pages use the faster non-AI pipeline.
+
+Architecture:
+    1. Analyze PDF → Determine complexity per page
+    2. Route complex pages → AI Pipeline (Claude Vision)
+    3. Route simple pages → Non-AI Pipeline (PyMuPDF text extraction)
+    4. Merge results → Unified DocBook XML output
+
+Usage:
+    from hybrid_conversion_router import HybridConversionRouter
+
+    router = HybridConversionRouter(config)
+    result = router.convert_pdf("document.pdf", output_dir="./output")
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# PyMuPDF for PDF processing
+try:
+    import fitz  # PyMuPDF
+    HAS_FITZ = True
+except ImportError:
+    HAS_FITZ = False
+
+# Import complexity analyzer
+from page_complexity_analyzer import (
+    PageComplexityAnalyzer,
+    PDFComplexityReport,
+    ComplexityThresholds,
+    ComplexityLevel,
+)
+
+
+@dataclass
+class HybridConfig:
+    """Configuration for hybrid conversion routing."""
+    # Complexity analysis settings
+    complexity_thresholds: ComplexityThresholds = field(default_factory=ComplexityThresholds)
+
+    # AI pipeline settings
+    ai_model: str = "claude-sonnet-4-20250514"
+    ai_dpi: int = 300
+    ai_temperature: float = 0.0
+    ai_max_tokens: int = 8192
+    ai_batch_size: int = 10
+
+    # Non-AI pipeline settings
+    nonai_preserve_formatting: bool = True
+    nonai_extract_images: bool = True
+
+    # Routing behavior
+    force_ai_pages: List[int] = field(default_factory=list)  # Always use AI for these pages
+    force_nonai_pages: List[int] = field(default_factory=list)  # Always use non-AI for these pages
+    ai_fallback_enabled: bool = True  # Fall back to AI if non-AI fails
+
+    # Output settings
+    merge_strategy: str = "sequential"  # sequential, interleave
+    preserve_page_order: bool = True
+    create_merged_xml: bool = True
+
+    # Performance settings
+    parallel_nonai: bool = True
+    max_workers: int = 4
+
+    # Verbose output
+    verbose: bool = True
+
+
+@dataclass
+class PageConversionResult:
+    """Result of converting a single page."""
+    page_num: int
+    pipeline: str  # "ai" or "nonai"
+    success: bool
+    content: str  # Markdown or XML content
+    tables: List[str] = field(default_factory=list)
+    images: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+    confidence: float = 1.0
+
+
+@dataclass
+class HybridConversionResult:
+    """Result of hybrid PDF conversion."""
+    pdf_path: str
+    output_dir: str
+    success: bool
+
+    # Routing statistics
+    total_pages: int = 0
+    ai_pages: List[int] = field(default_factory=list)
+    nonai_pages: List[int] = field(default_factory=list)
+
+    # Conversion results
+    page_results: Dict[int, PageConversionResult] = field(default_factory=dict)
+
+    # Output files
+    merged_xml_path: Optional[str] = None
+    merged_md_path: Optional[str] = None
+    complexity_report_path: Optional[str] = None
+
+    # Error tracking
+    failed_pages: List[int] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        """Generate a summary of the conversion."""
+        lines = [
+            f"Hybrid Conversion Result: {Path(self.pdf_path).name}",
+            f"{'=' * 60}",
+            f"Total pages: {self.total_pages}",
+            f"AI pipeline: {len(self.ai_pages)} pages",
+            f"Non-AI pipeline: {len(self.nonai_pages)} pages",
+            f"Failed: {len(self.failed_pages)} pages",
+            f"Success: {'Yes' if self.success else 'No'}",
+        ]
+        if self.merged_xml_path:
+            lines.append(f"Output XML: {self.merged_xml_path}")
+        if self.errors:
+            lines.append(f"Errors: {len(self.errors)}")
+        return "\n".join(lines)
+
+
+class NonAIPageConverter:
+    """
+    Non-AI page converter using PyMuPDF for text extraction.
+
+    This is a simplified, fast converter for pages with straightforward
+    text content. It extracts text with basic formatting preservation
+    but doesn't handle complex tables or layouts well.
+    """
+
+    def __init__(self, config: HybridConfig):
+        if not HAS_FITZ:
+            raise ImportError("PyMuPDF (fitz) is required")
+        self.config = config
+
+    def convert_page(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        output_dir: Path
+    ) -> PageConversionResult:
+        """
+        Convert a single page using non-AI extraction.
+
+        Args:
+            pdf_path: Path to PDF file
+            page_num: 1-based page number
+            output_dir: Output directory for extracted content
+
+        Returns:
+            PageConversionResult with extracted content
+        """
+        result = PageConversionResult(
+            page_num=page_num,
+            pipeline="nonai",
+            success=False,
+            content=""
+        )
+
+        try:
+            doc = fitz.open(str(pdf_path))
+            page = doc[page_num - 1]
+
+            # Extract text with formatting
+            content = self._extract_text_with_formatting(page)
+
+            # Extract images if enabled
+            if self.config.nonai_extract_images:
+                images = self._extract_page_images(page, page_num, output_dir)
+                result.images = images
+
+            doc.close()
+
+            result.content = content
+            result.success = True
+            result.confidence = 0.95  # Non-AI has high confidence for simple text
+
+        except Exception as e:
+            result.error = str(e)
+            result.success = False
+
+        return result
+
+    def _extract_text_with_formatting(self, page: fitz.Page) -> str:
+        """Extract text from page with basic markdown formatting."""
+        text_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        blocks = text_dict.get("blocks", [])
+
+        lines = []
+        current_para = []
+
+        for block in blocks:
+            if block.get("type") != 0:  # Skip non-text blocks
+                continue
+
+            block_lines = []
+            for line in block.get("lines", []):
+                line_text = ""
+                for span in line.get("spans", []):
+                    text = span.get("text", "")
+                    font = span.get("font", "")
+                    size = span.get("size", 12)
+                    flags = span.get("flags", 0)
+
+                    # Apply formatting based on font properties
+                    is_bold = "bold" in font.lower() or (flags & 16)
+                    is_italic = "italic" in font.lower() or (flags & 2)
+
+                    if is_bold and is_italic:
+                        text = f"***{text}***"
+                    elif is_bold:
+                        text = f"**{text}**"
+                    elif is_italic:
+                        text = f"*{text}*"
+
+                    line_text += text
+
+                block_lines.append(line_text)
+
+            # Join lines within block
+            block_text = "\n".join(block_lines)
+            if block_text.strip():
+                lines.append(block_text)
+
+        # Join blocks with paragraph breaks
+        return "\n\n".join(lines)
+
+    def _extract_page_images(
+        self,
+        page: fitz.Page,
+        page_num: int,
+        output_dir: Path
+    ) -> List[str]:
+        """Extract images from a page."""
+        images = page.get_images(full=True)
+        extracted = []
+
+        for img_idx, img in enumerate(images, 1):
+            try:
+                xref = img[0]
+                base_image = page.parent.extract_image(xref)
+                if base_image:
+                    ext = base_image.get("ext", "png")
+                    filename = f"page{page_num}_img{img_idx}.{ext}"
+                    filepath = output_dir / filename
+
+                    with open(filepath, "wb") as f:
+                        f.write(base_image["image"])
+
+                    extracted.append(str(filepath))
+            except Exception:
+                pass
+
+        return extracted
+
+
+class HybridConversionRouter:
+    """
+    Routes PDF pages between AI and non-AI conversion pipelines.
+
+    This is the main class for hybrid conversion. It:
+    1. Analyzes page complexity
+    2. Routes pages to appropriate pipeline
+    3. Coordinates parallel processing
+    4. Merges results into unified output
+    """
+
+    def __init__(self, config: Optional[HybridConfig] = None):
+        """
+        Initialize the hybrid conversion router.
+
+        Args:
+            config: Optional configuration (uses defaults if not provided)
+        """
+        if not HAS_FITZ:
+            raise ImportError("PyMuPDF (fitz) is required")
+
+        self.config = config or HybridConfig()
+        self.analyzer = PageComplexityAnalyzer(
+            thresholds=self.config.complexity_thresholds,
+            verbose=self.config.verbose
+        )
+        self.nonai_converter = NonAIPageConverter(self.config)
+
+    def convert_pdf(
+        self,
+        pdf_path: str | Path,
+        output_dir: str | Path,
+        multimedia_dir: Optional[str | Path] = None
+    ) -> HybridConversionResult:
+        """
+        Convert a PDF using hybrid routing.
+
+        Args:
+            pdf_path: Path to input PDF
+            output_dir: Directory for output files
+            multimedia_dir: Optional directory for multimedia files
+
+        Returns:
+            HybridConversionResult with conversion details
+        """
+        pdf_path = Path(pdf_path).resolve()
+        output_dir = Path(output_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if multimedia_dir:
+            multimedia_dir = Path(multimedia_dir).resolve()
+            multimedia_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            multimedia_dir = output_dir / f"{pdf_path.stem}_MultiMedia"
+            multimedia_dir.mkdir(parents=True, exist_ok=True)
+
+        result = HybridConversionResult(
+            pdf_path=str(pdf_path),
+            output_dir=str(output_dir),
+            success=False
+        )
+
+        if self.config.verbose:
+            print(f"\n{'=' * 60}")
+            print(f"HYBRID CONVERSION: {pdf_path.name}")
+            print(f"{'=' * 60}")
+
+        # Step 1: Analyze complexity
+        if self.config.verbose:
+            print(f"\nStep 1: Analyzing page complexity...")
+
+        complexity_report = self.analyzer.analyze_pdf(pdf_path)
+        result.total_pages = complexity_report.total_pages
+
+        # Save complexity report
+        report_path = output_dir / f"{pdf_path.stem}_complexity_report.json"
+        self._save_complexity_report(complexity_report, report_path)
+        result.complexity_report_path = str(report_path)
+
+        # Step 2: Determine routing (with overrides)
+        ai_pages, nonai_pages = self._determine_routing(complexity_report)
+        result.ai_pages = ai_pages
+        result.nonai_pages = nonai_pages
+
+        if self.config.verbose:
+            print(f"\nStep 2: Routing decision:")
+            print(f"  AI pipeline: {len(ai_pages)} pages {ai_pages[:10]}{'...' if len(ai_pages) > 10 else ''}")
+            print(f"  Non-AI pipeline: {len(nonai_pages)} pages {nonai_pages[:10]}{'...' if len(nonai_pages) > 10 else ''}")
+
+        # Step 3: Convert non-AI pages
+        if nonai_pages:
+            if self.config.verbose:
+                print(f"\nStep 3: Converting {len(nonai_pages)} pages with non-AI pipeline...")
+
+            nonai_results = self._convert_nonai_pages(pdf_path, nonai_pages, multimedia_dir)
+            result.page_results.update(nonai_results)
+
+            # Check for failures and potentially fall back to AI
+            for page_num, page_result in nonai_results.items():
+                if not page_result.success and self.config.ai_fallback_enabled:
+                    if self.config.verbose:
+                        print(f"  Page {page_num} failed, falling back to AI...")
+                    if page_num not in ai_pages:
+                        ai_pages.append(page_num)
+                        nonai_pages.remove(page_num)
+
+        # Step 4: Convert AI pages
+        if ai_pages:
+            if self.config.verbose:
+                print(f"\nStep 4: Converting {len(ai_pages)} pages with AI pipeline...")
+
+            ai_results = self._convert_ai_pages(pdf_path, ai_pages, output_dir, multimedia_dir)
+            result.page_results.update(ai_results)
+
+        # Step 5: Merge results
+        if self.config.verbose:
+            print(f"\nStep 5: Merging results...")
+
+        merged_content = self._merge_results(result.page_results, complexity_report.total_pages)
+
+        # Save merged output
+        md_path = output_dir / f"{pdf_path.stem}_hybrid_intermediate.md"
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(merged_content)
+        result.merged_md_path = str(md_path)
+
+        # Convert to DocBook XML
+        if self.config.create_merged_xml:
+            xml_path = output_dir / f"{pdf_path.stem}_hybrid_docbook42.xml"
+            self._convert_to_docbook(merged_content, xml_path, pdf_path.stem)
+            result.merged_xml_path = str(xml_path)
+
+        # Collect failed pages
+        result.failed_pages = [
+            page_num for page_num, page_result in result.page_results.items()
+            if not page_result.success
+        ]
+
+        result.success = len(result.failed_pages) == 0
+
+        if self.config.verbose:
+            print(f"\n{result.summary()}")
+
+        return result
+
+    def _determine_routing(
+        self,
+        report: PDFComplexityReport
+    ) -> Tuple[List[int], List[int]]:
+        """
+        Determine which pages go to which pipeline.
+
+        Applies force overrides from config.
+        """
+        ai_pages = list(report.ai_route_pages)
+        nonai_pages = list(report.non_ai_route_pages)
+
+        # Apply force overrides
+        for page in self.config.force_ai_pages:
+            if page in nonai_pages:
+                nonai_pages.remove(page)
+            if page not in ai_pages and 1 <= page <= report.total_pages:
+                ai_pages.append(page)
+
+        for page in self.config.force_nonai_pages:
+            if page in ai_pages:
+                ai_pages.remove(page)
+            if page not in nonai_pages and 1 <= page <= report.total_pages:
+                nonai_pages.append(page)
+
+        # Sort for consistent ordering
+        ai_pages.sort()
+        nonai_pages.sort()
+
+        return ai_pages, nonai_pages
+
+    def _convert_nonai_pages(
+        self,
+        pdf_path: Path,
+        pages: List[int],
+        output_dir: Path
+    ) -> Dict[int, PageConversionResult]:
+        """Convert pages using the non-AI pipeline."""
+        results = {}
+
+        if self.config.parallel_nonai:
+            with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        self.nonai_converter.convert_page,
+                        pdf_path,
+                        page_num,
+                        output_dir
+                    ): page_num
+                    for page_num in pages
+                }
+
+                for future in as_completed(futures):
+                    page_num = futures[future]
+                    try:
+                        result = future.result()
+                        results[page_num] = result
+                    except Exception as e:
+                        results[page_num] = PageConversionResult(
+                            page_num=page_num,
+                            pipeline="nonai",
+                            success=False,
+                            content="",
+                            error=str(e)
+                        )
+        else:
+            for page_num in pages:
+                result = self.nonai_converter.convert_page(pdf_path, page_num, output_dir)
+                results[page_num] = result
+
+        return results
+
+    def _convert_ai_pages(
+        self,
+        pdf_path: Path,
+        pages: List[int],
+        output_dir: Path,
+        multimedia_dir: Path
+    ) -> Dict[int, PageConversionResult]:
+        """
+        Convert pages using the AI pipeline.
+
+        This imports and uses the existing ai_pdf_conversion_service.
+        """
+        results = {}
+
+        try:
+            # Import AI conversion service
+            from ai_pdf_conversion_service import (
+                ClaudeVisionProcessor,
+                VisionConfig,
+                render_pdf_page,
+            )
+
+            # Configure AI processor
+            ai_config = VisionConfig(
+                model=self.config.ai_model,
+                dpi=self.config.ai_dpi,
+                temperature=self.config.ai_temperature,
+                max_tokens=self.config.ai_max_tokens,
+                batch_size=self.config.ai_batch_size,
+            )
+
+            processor = ClaudeVisionProcessor(config=ai_config)
+
+            # Get total page count
+            doc = fitz.open(str(pdf_path))
+            total_pages = len(doc)
+            doc.close()
+
+            # Process each page
+            for page_num in pages:
+                if self.config.verbose:
+                    print(f"  Processing page {page_num} with AI...")
+
+                try:
+                    # Render page as image
+                    image_data = render_pdf_page(
+                        pdf_path,
+                        page_num,
+                        dpi=ai_config.dpi,
+                        crop_header_pct=ai_config.crop_header_pct,
+                        crop_footer_pct=ai_config.crop_footer_pct,
+                    )
+
+                    if image_data is None:
+                        raise ValueError(f"Failed to render page {page_num}")
+
+                    # Extract content using AI
+                    extraction = processor.extract_page_content(
+                        image_data,
+                        page_num,
+                        total_pages
+                    )
+
+                    results[page_num] = PageConversionResult(
+                        page_num=page_num,
+                        pipeline="ai",
+                        success=not extraction.get("error"),
+                        content=extraction.get("content", ""),
+                        tables=[t.get("html", "") for t in extraction.get("tables", [])],
+                        confidence=extraction.get("confidence", 0.9),
+                        error=extraction.get("error"),
+                    )
+
+                except Exception as e:
+                    results[page_num] = PageConversionResult(
+                        page_num=page_num,
+                        pipeline="ai",
+                        success=False,
+                        content="",
+                        error=str(e)
+                    )
+
+        except ImportError as e:
+            # AI service not available - return all as failed
+            for page_num in pages:
+                results[page_num] = PageConversionResult(
+                    page_num=page_num,
+                    pipeline="ai",
+                    success=False,
+                    content="",
+                    error=f"AI service import failed: {e}"
+                )
+
+        return results
+
+    def _merge_results(
+        self,
+        page_results: Dict[int, PageConversionResult],
+        total_pages: int
+    ) -> str:
+        """Merge page results into unified content."""
+        lines = []
+
+        for page_num in range(1, total_pages + 1):
+            result = page_results.get(page_num)
+
+            lines.append(f"\n<!-- PAGE {page_num} -->\n")
+
+            if result is None:
+                lines.append(f"<!-- ERROR: No result for page {page_num} -->\n")
+                continue
+
+            if not result.success:
+                lines.append(f"<!-- ERROR: Page {page_num} failed: {result.error} -->\n")
+                continue
+
+            # Add pipeline marker
+            lines.append(f"<!-- Pipeline: {result.pipeline.upper()} -->\n")
+
+            # Add content
+            lines.append(result.content)
+
+            # Add tables if any
+            for table in result.tables:
+                lines.append("\n")
+                lines.append(table)
+
+        return "\n".join(lines)
+
+    def _convert_to_docbook(
+        self,
+        markdown_content: str,
+        output_path: Path,
+        title: str
+    ) -> None:
+        """Convert merged markdown to DocBook XML."""
+        # Simple conversion - for full conversion, use the AI service converter
+        lines = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"',
+            '  "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">',
+            '<book>',
+            '<bookinfo>',
+            f'  <title>{self._escape_xml(title)}</title>',
+            '</bookinfo>',
+            '<chapter>',
+            '  <title>Content</title>',
+        ]
+
+        # Convert markdown paragraphs to DocBook
+        paragraphs = markdown_content.split("\n\n")
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+
+            # Skip comments
+            if para.startswith("<!--"):
+                lines.append(f"  {para}")
+                continue
+
+            # Handle headings
+            if para.startswith("# "):
+                text = para[2:].strip()
+                lines.append(f"  <sect1><title>{self._escape_xml(text)}</title></sect1>")
+            elif para.startswith("## "):
+                text = para[3:].strip()
+                lines.append(f"  <sect2><title>{self._escape_xml(text)}</title></sect2>")
+            elif para.startswith("### "):
+                text = para[4:].strip()
+                lines.append(f"  <sect3><title>{self._escape_xml(text)}</title></sect3>")
+            elif para.startswith("<table"):
+                # Pass through HTML tables
+                lines.append(f"  {para}")
+            else:
+                # Regular paragraph
+                lines.append(f"  <para>{self._escape_xml(para)}</para>")
+
+        lines.extend([
+            '</chapter>',
+            '</book>',
+        ])
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+    def _escape_xml(self, text: str) -> str:
+        """Escape special XML characters."""
+        return (
+            text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
+
+    def _save_complexity_report(
+        self,
+        report: PDFComplexityReport,
+        output_path: Path
+    ) -> None:
+        """Save complexity report to JSON."""
+        data = {
+            "pdf_path": report.pdf_path,
+            "total_pages": report.total_pages,
+            "routing": {
+                "ai_pages": report.ai_route_pages,
+                "non_ai_pages": report.non_ai_route_pages,
+            },
+            "classification": {
+                "simple": report.simple_pages,
+                "moderate": report.moderate_pages,
+                "complex": report.complex_pages,
+                "highly_complex": report.highly_complex_pages,
+            },
+            "statistics": {
+                "total_tables": report.total_tables,
+                "total_images": report.total_images,
+                "avg_complexity_score": report.avg_complexity_score,
+                "max_tables_per_page": report.max_tables_per_page,
+                "max_images_per_page": report.max_images_per_page,
+            },
+            "page_details": {
+                str(page_num): {
+                    "complexity_level": complexity.complexity_level.value,
+                    "route_to_ai": complexity.route_to_ai,
+                    "table_count": complexity.table_count,
+                    "image_count": complexity.image_count,
+                    "text_block_count": complexity.text_block_count,
+                    "column_count": complexity.column_count,
+                    "complexity_score": complexity.complexity_score,
+                    "reasons": complexity.complexity_reasons,
+                }
+                for page_num, complexity in report.page_results.items()
+            }
+        }
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+
+def main():
+    """CLI entry point for hybrid conversion."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Convert PDF using hybrid AI/non-AI routing"
+    )
+    parser.add_argument("pdf", help="Path to PDF file")
+    parser.add_argument("--out", "-o", default="output", help="Output directory")
+    parser.add_argument(
+        "--model",
+        default="claude-sonnet-4-20250514",
+        help="Claude model for AI conversion"
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=300,
+        help="DPI for page rendering"
+    )
+    parser.add_argument(
+        "--force-ai",
+        type=str,
+        default="",
+        help="Comma-separated page numbers to force AI processing"
+    )
+    parser.add_argument(
+        "--force-nonai",
+        type=str,
+        default="",
+        help="Comma-separated page numbers to force non-AI processing"
+    )
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress verbose output"
+    )
+
+    args = parser.parse_args()
+
+    # Parse force lists
+    force_ai = []
+    if args.force_ai:
+        force_ai = [int(p.strip()) for p in args.force_ai.split(",") if p.strip()]
+
+    force_nonai = []
+    if args.force_nonai:
+        force_nonai = [int(p.strip()) for p in args.force_nonai.split(",") if p.strip()]
+
+    # Configure
+    config = HybridConfig(
+        ai_model=args.model,
+        ai_dpi=args.dpi,
+        force_ai_pages=force_ai,
+        force_nonai_pages=force_nonai,
+        verbose=not args.quiet,
+    )
+
+    # Run conversion
+    router = HybridConversionRouter(config)
+    result = router.convert_pdf(args.pdf, args.out)
+
+    # Exit code
+    return 0 if result.success else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
