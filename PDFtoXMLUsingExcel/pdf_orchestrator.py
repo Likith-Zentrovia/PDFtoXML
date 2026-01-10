@@ -606,6 +606,12 @@ Examples:
   Skip RittDoc packaging (just XML and DOCX):
     python pdf_orchestrator.py mybook.pdf --skip-rittdoc
 
+  Hybrid mode (routes complex pages to AI, simple pages to non-AI):
+    python pdf_orchestrator.py mybook.pdf --hybrid
+
+  Hybrid mode with custom complexity thresholds:
+    python pdf_orchestrator.py mybook.pdf --hybrid --table-threshold 1 --image-threshold 3
+
 Environment Variables:
   ANTHROPIC_API_KEY - Required for Claude Vision API
         """
@@ -714,6 +720,43 @@ Environment Variables:
         help="API mode: stop after DocBook XML creation (skip editor, RittDoc, DOCX). Used by REST API."
     )
 
+    # Hybrid conversion mode - routes pages between AI and non-AI pipelines
+    hybrid_group = ap.add_argument_group("Hybrid Conversion Mode")
+    hybrid_group.add_argument(
+        "--hybrid",
+        action="store_true",
+        help="Enable hybrid mode: route complex pages to AI, simple pages to non-AI pipeline"
+    )
+    hybrid_group.add_argument(
+        "--table-threshold",
+        type=int,
+        default=2,
+        help="Number of tables to consider a page complex (default: 2)"
+    )
+    hybrid_group.add_argument(
+        "--image-threshold",
+        type=int,
+        default=4,
+        help="Number of images to consider a page complex (default: 4)"
+    )
+    hybrid_group.add_argument(
+        "--force-ai-pages",
+        type=str,
+        default="",
+        help="Comma-separated page numbers to always route to AI pipeline"
+    )
+    hybrid_group.add_argument(
+        "--force-nonai-pages",
+        type=str,
+        default="",
+        help="Comma-separated page numbers to always route to non-AI pipeline"
+    )
+    hybrid_group.add_argument(
+        "--complexity-report",
+        action="store_true",
+        help="Generate detailed complexity analysis report (JSON)"
+    )
+
     args = ap.parse_args()
 
     pdf_path = Path(args.pdf).expanduser().resolve()
@@ -726,6 +769,129 @@ Environment Variables:
 
     out_dir = Path(args.out).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # =========================================================================
+    # HYBRID CONVERSION MODE
+    # Routes complex pages to AI pipeline, simple pages to non-AI pipeline
+    # =========================================================================
+    if args.hybrid:
+        print("\n" + "=" * 80)
+        print("HYBRID CONVERSION MODE")
+        print("=" * 80)
+        print("  Analyzing page complexity to route between AI and non-AI pipelines...")
+
+        try:
+            from hybrid_conversion_router import HybridConversionRouter, HybridConfig
+            from page_complexity_analyzer import ComplexityThresholds
+
+            # Parse force page lists
+            force_ai_pages = []
+            if args.force_ai_pages:
+                force_ai_pages = [int(p.strip()) for p in args.force_ai_pages.split(",") if p.strip()]
+
+            force_nonai_pages = []
+            if args.force_nonai_pages:
+                force_nonai_pages = [int(p.strip()) for p in args.force_nonai_pages.split(",") if p.strip()]
+
+            # Configure complexity thresholds
+            thresholds = ComplexityThresholds(
+                table_count_complex=args.table_threshold,
+                image_count_complex=args.image_threshold,
+            )
+
+            # Configure hybrid router
+            hybrid_config = HybridConfig(
+                complexity_thresholds=thresholds,
+                ai_model=args.model,
+                ai_dpi=args.dpi,
+                ai_temperature=args.temperature,
+                ai_max_tokens=args.max_tokens,
+                ai_batch_size=args.batch_size,
+                force_ai_pages=force_ai_pages,
+                force_nonai_pages=force_nonai_pages,
+                verbose=True,
+            )
+
+            # Run hybrid conversion
+            router = HybridConversionRouter(hybrid_config)
+            hybrid_result = router.convert_pdf(pdf_path, out_dir)
+
+            # Print results
+            print("\n" + "=" * 80)
+            print("HYBRID CONVERSION COMPLETE")
+            print("=" * 80)
+            print(hybrid_result.summary())
+
+            if hybrid_result.merged_xml_path:
+                print(f"\nOutputs in: {out_dir}")
+                print(f"  XML: {Path(hybrid_result.merged_xml_path).name}")
+                if hybrid_result.merged_md_path:
+                    print(f"  MD:  {Path(hybrid_result.merged_md_path).name}")
+                if hybrid_result.complexity_report_path:
+                    print(f"  Report: {Path(hybrid_result.complexity_report_path).name}")
+
+            # Continue with RittDoc packaging if not skipped
+            if not args.skip_rittdoc and hybrid_result.merged_xml_path:
+                out_xml = Path(hybrid_result.merged_xml_path)
+                multimedia_dir = out_dir / f"{pdf_path.stem}_MultiMedia"
+
+                # Create RittDoc package
+                print("\n" + "=" * 80)
+                print("STEP: CREATING RITTDOC COMPLIANT PACKAGE")
+                print("=" * 80)
+
+                dtd_path = Path(args.dtd)
+                if dtd_path.exists():
+                    try:
+                        from rittdoc_compliance_pipeline import RittDocCompliancePipeline
+                        from package import (
+                            BOOK_DOCTYPE_SYSTEM_DEFAULT,
+                            package_docbook,
+                            make_file_fetcher,
+                        )
+
+                        root = etree.parse(str(out_xml)).getroot()
+                        search_paths = [multimedia_dir, out_dir]
+                        media_fetcher = make_file_fetcher(search_paths, None)
+
+                        intermediate_zip = out_dir / f"{pdf_path.stem}_docbook.zip"
+                        package_docbook(
+                            root=root,
+                            root_name=(root.tag.split('}', 1)[-1] if root.tag.startswith('{') else root.tag),
+                            dtd_system=BOOK_DOCTYPE_SYSTEM_DEFAULT,
+                            zip_path=str(intermediate_zip),
+                            processing_instructions=[],
+                            assets=[],
+                            media_fetcher=media_fetcher,
+                            book_doctype_system=BOOK_DOCTYPE_SYSTEM_DEFAULT,
+                            metadata_dir=out_dir,
+                        )
+
+                        out_rittdoc_zip = out_dir / (pdf_path.stem + "_rittdoc.zip")
+                        pipeline = RittDocCompliancePipeline(dtd_path)
+                        pipeline.run(
+                            input_zip=intermediate_zip,
+                            output_zip=out_rittdoc_zip,
+                            max_iterations=args.iterations
+                        )
+                        print(f"  ✓ RittDoc package: {out_rittdoc_zip}")
+                    except Exception as e:
+                        print(f"  ⚠ RittDoc packaging failed: {e}")
+
+            return 0 if hybrid_result.success else 1
+
+        except ImportError as e:
+            print(f"ERROR: Could not import hybrid conversion modules: {e}")
+            print("  Falling back to standard AI-only conversion...")
+        except Exception as e:
+            print(f"ERROR: Hybrid conversion failed: {e}")
+            import traceback
+            traceback.print_exc()
+            print("  Falling back to standard AI-only conversion...")
+
+    # =========================================================================
+    # STANDARD AI-ONLY CONVERSION (Default Mode)
+    # =========================================================================
 
     # Initialize conversion tracker for dashboard generation
     tracker = None

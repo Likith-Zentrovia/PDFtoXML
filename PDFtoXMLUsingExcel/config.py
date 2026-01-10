@@ -131,6 +131,55 @@ class APIConfig:
 
 
 @dataclass
+class ComplexityConfig:
+    """
+    Configuration for page complexity detection and hybrid routing.
+
+    This controls how pages are analyzed for complexity and routed
+    between AI and non-AI conversion pipelines.
+    """
+    # Enable/disable hybrid mode
+    enabled: bool = False
+
+    # Table thresholds
+    table_count_simple: int = 0       # 0 tables = simple
+    table_count_moderate: int = 1     # 1 table = moderate
+    table_count_complex: int = 2      # 2+ tables = complex
+
+    # Image thresholds
+    image_count_simple: int = 1       # 0-1 images = simple
+    image_count_moderate: int = 3     # 2-3 images = moderate
+    image_count_complex: int = 4      # 4+ images = complex
+    image_area_threshold: float = 0.3 # 30% of page covered by images = complex
+
+    # Layout thresholds
+    column_count_complex: int = 3     # 3+ columns = complex
+
+    # Text density thresholds
+    min_chars_per_page: int = 100     # Pages with < 100 chars might be mostly images
+
+    # Mixed content scoring
+    mixed_content_score_complex: int = 5  # Combined score threshold for complexity
+
+    # Routing overrides
+    force_ai_pages: List[int] = field(default_factory=list)    # Always use AI for these pages
+    force_nonai_pages: List[int] = field(default_factory=list) # Always use non-AI for these pages
+
+    # Fallback behavior
+    ai_fallback_enabled: bool = True  # Fall back to AI if non-AI fails
+
+    # Performance settings
+    parallel_nonai: bool = True       # Process non-AI pages in parallel
+    max_workers: int = 4              # Max parallel workers for non-AI
+
+    # Output settings
+    generate_complexity_report: bool = True  # Generate JSON complexity report
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class PipelineConfig:
     """
     Complete configuration for the PDF to XML pipeline.
@@ -145,6 +194,7 @@ class PipelineConfig:
     output: OutputConfig = field(default_factory=OutputConfig)
     editor: EditorConfig = field(default_factory=EditorConfig)
     api: APIConfig = field(default_factory=APIConfig)
+    complexity: ComplexityConfig = field(default_factory=ComplexityConfig)
 
     # Convenience properties for common settings
     @property
@@ -177,6 +227,7 @@ class PipelineConfig:
             "output": self.output.to_dict(),
             "editor": self.editor.to_dict(),
             "api": self.api.to_dict(),
+            "complexity": self.complexity.to_dict(),
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -211,6 +262,8 @@ class PipelineConfig:
             if "upload_dir" in api_data:
                 api_data["upload_dir"] = Path(api_data["upload_dir"])
             config.api = APIConfig(**api_data)
+        if "complexity" in data:
+            config.complexity = ComplexityConfig(**data["complexity"])
 
         return config
 
