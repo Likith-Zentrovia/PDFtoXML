@@ -1,0 +1,74 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv/
+ENV/
+env/
+.eggs
+*.egg-info/
+*.egg
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# Build
+build/
+dist/
+*.manifest
+*.spec
+
+# Documentation (keep in image for reference)
+# *.md
+
+# Development files
+.env
+.env.local
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large test files
+tests/fixtures/*.pdf
+*.pdf
+
+# Legacy folder (not needed in production)
+legacy/
+
+# Output directories (mounted as volumes)
+output/
+uploads/
+MultiMedia/
+
+# Docker files (not needed inside container)
+docker-compose*.yaml
+Dockerfile*
+.dockerignore
+
+# CI/CD
+.github/

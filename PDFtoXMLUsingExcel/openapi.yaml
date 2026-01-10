@@ -1,0 +1,805 @@
+openapi: 3.0.3
+info:
+  title: PDF-to-XML Conversion Pipeline API
+  description: |
+    REST API for converting PDF documents to structured XML (DocBook 4.2) format
+    with optional web-based editing, RittDoc packaging, and DOCX generation.
+
+    ## Workflow
+    1. Upload PDF via `POST /api/v1/convert`
+    2. Poll `GET /api/v1/jobs/{job_id}` until status is `completed`
+    3. Download files via `GET /api/v1/jobs/{job_id}/files/{filename}`
+       - Zip package is created automatically, no finalize step needed
+    4. (Optional) Launch editor via `POST /api/v1/jobs/{job_id}/editor` for corrections
+       - Saving in editor automatically regenerates the zip package
+
+    ## Environment Variables
+    - `PDF_PIPELINE_URL`: Base URL of this service
+    - `ANTHROPIC_API_KEY`: Required for AI conversion
+    - `MONGODB_URI`: Optional MongoDB connection for persistent dashboard
+  version: 2.3.0
+  contact:
+    name: PDF Pipeline Support
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: http://pdf-pipeline:8000
+    description: Docker Compose
+  - url: https://pdf-api.stage.company.com
+    description: Staging
+  - url: https://pdf-api.company.com
+    description: Production
+
+tags:
+  - name: Conversion
+    description: PDF conversion operations
+  - name: Editor
+    description: Web editor management
+  - name: Finalization
+    description: Final packaging and output generation
+  - name: Files
+    description: Output file access
+  - name: Dashboard
+    description: In-memory dashboard (non-persistent)
+  - name: MongoDB Dashboard
+    description: Persistent MongoDB dashboard
+  - name: Configuration
+    description: Configuration options for UI forms
+  - name: System
+    description: Health and info endpoints
+
+paths:
+  /api/v1/convert:
+    post:
+      tags: [Conversion]
+      summary: Upload PDF and start conversion
+      description: |
+        Uploads a PDF file and starts the conversion process.
+        Returns immediately with job_id for polling.
+      operationId: convertPdf
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PDF file to convert
+                model:
+                  type: string
+                  default: claude-sonnet-4-20250514
+                  description: AI model for conversion
+                  enum:
+                    - claude-sonnet-4-20250514
+                    - claude-opus-4-5-20251101
+                    - claude-3-5-sonnet-20241022
+                    - claude-3-5-haiku-20241022
+                dpi:
+                  type: integer
+                  default: 300
+                  description: Image resolution
+                  enum: [150, 200, 300, 400]
+                temperature:
+                  type: number
+                  default: 0.0
+                  description: AI temperature (0 = deterministic)
+                  enum: [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
+                batch_size:
+                  type: integer
+                  default: 10
+                  description: Pages per batch
+                  enum: [5, 10, 15, 20, 25, 50]
+                skip_extraction:
+                  type: boolean
+                  default: false
+                  description: Skip image extraction
+                skip_rittdoc:
+                  type: boolean
+                  default: false
+                  description: Skip RittDoc packaging
+      responses:
+        '200':
+          description: Conversion started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobInfo'
+        '400':
+          description: Invalid request (no file or wrong format)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/jobs/{job_id}:
+    get:
+      tags: [Conversion]
+      summary: Get job status
+      description: Poll this endpoint to track conversion progress
+      operationId: getJob
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobInfo'
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Conversion]
+      summary: Cancel or delete a job
+      operationId: deleteJob
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+
+  /api/v1/jobs:
+    get:
+      tags: [Conversion]
+      summary: List all jobs
+      operationId: listJobs
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/JobStatus'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+      responses:
+        '200':
+          description: List of jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/JobInfo'
+
+  /api/v1/jobs/{job_id}/editor:
+    post:
+      tags: [Editor]
+      summary: Launch web editor
+      description: |
+        Starts the web-based XML editor for manual corrections.
+        Returns editor URL to open in browser or iframe.
+        When user saves in the editor, full finalization runs automatically.
+      operationId: launchEditor
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Editor launched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EditorInfo'
+        '400':
+          description: Job not ready for editing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Job not found
+    delete:
+      tags: [Editor]
+      summary: Stop editor session
+      operationId: stopEditor
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Editor stopped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+
+  /api/v1/jobs/{job_id}/finalize:
+    post:
+      tags: [Finalization]
+      summary: Finalize without editing
+      description: |
+        Triggers final packaging without using the editor.
+        Creates RittDoc package and DOCX output.
+      operationId: finalizeJob
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeOptions'
+      responses:
+        '200':
+          description: Finalization complete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobInfo'
+        '400':
+          description: Job not ready for finalization
+
+  /api/v1/jobs/{job_id}/files:
+    get:
+      tags: [Files]
+      summary: List output files
+      operationId: listFiles
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: List of available files
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: string
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        size:
+                          type: integer
+                        download_url:
+                          type: string
+
+  /api/v1/jobs/{job_id}/files/{filename}:
+    get:
+      tags: [Files]
+      summary: Download a file
+      operationId: downloadFile
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Name of file to download
+      responses:
+        '200':
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: File not found
+
+  /api/v1/config/options:
+    get:
+      tags: [Configuration]
+      summary: Get configuration options for UI forms
+      description: |
+        Returns all dropdown options with labels for building configuration forms.
+        Use this to dynamically populate UI dropdowns.
+      operationId: getConfigOptions
+      responses:
+        '200':
+          description: Configuration options
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigOptions'
+
+  /api/v1/config/schema:
+    get:
+      tags: [Configuration]
+      summary: Get JSON Schema for validation
+      operationId: getConfigSchema
+      responses:
+        '200':
+          description: JSON Schema
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/v1/dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Get in-memory dashboard stats
+      description: Non-persistent, resets on service restart
+      operationId: getDashboard
+      responses:
+        '200':
+          description: Dashboard statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardStats'
+
+  /api/v1/mongodb/dashboard:
+    get:
+      tags: [MongoDB Dashboard]
+      summary: Get persistent dashboard stats
+      description: Requires MongoDB connection
+      operationId: getMongoDBDashboard
+      responses:
+        '200':
+          description: Dashboard statistics from MongoDB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardStats'
+        '503':
+          description: MongoDB not available
+
+  /api/v1/mongodb/conversions:
+    get:
+      tags: [MongoDB Dashboard]
+      summary: List conversions from MongoDB
+      operationId: listMongoDBConversions
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: skip
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Paginated list of conversions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConversionDocument'
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  skip:
+                    type: integer
+
+  /api/v1/mongodb/conversions/{job_id}:
+    get:
+      tags: [MongoDB Dashboard]
+      summary: Get conversion details from MongoDB
+      operationId: getMongoDBConversion
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Conversion details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversionDocument'
+
+  /api/v1/mongodb/stats/daily:
+    get:
+      tags: [MongoDB Dashboard]
+      summary: Get daily statistics
+      operationId: getDailyStats
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: Daily stats for charting
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    date:
+                      type: string
+                      format: date
+                    total:
+                      type: integer
+                    successful:
+                      type: integer
+                    failed:
+                      type: integer
+
+  /api/v1/mongodb/stats/publishers:
+    get:
+      tags: [MongoDB Dashboard]
+      summary: Get stats by publisher
+      operationId: getPublisherStats
+      responses:
+        '200':
+          description: Publisher statistics
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    publisher:
+                      type: string
+                    count:
+                      type: integer
+                    success_rate:
+                      type: number
+
+  /api/v1/mongodb/sync-excel:
+    post:
+      tags: [MongoDB Dashboard]
+      summary: Sync Excel dashboard to MongoDB
+      operationId: syncExcelToMongoDB
+      responses:
+        '200':
+          description: Sync completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  synced:
+                    type: integer
+                  errors:
+                    type: integer
+
+  /api/v1/health:
+    get:
+      tags: [System]
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service health status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded, unhealthy]
+                  mongodb:
+                    type: boolean
+                  tracking:
+                    type: boolean
+                  jobs_in_progress:
+                    type: integer
+
+  /api/v1/info:
+    get:
+      tags: [System]
+      summary: Get API info
+      operationId: getInfo
+      responses:
+        '200':
+          description: API information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  version:
+                    type: string
+                  description:
+                    type: string
+                  endpoints:
+                    type: object
+
+  /api/v1/models:
+    get:
+      tags: [System]
+      summary: List available AI models
+      operationId: listModels
+      responses:
+        '200':
+          description: Available models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        description:
+                          type: string
+                  default:
+                    type: string
+
+components:
+  parameters:
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Unique job identifier
+
+  schemas:
+    JobStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - extracting
+        - converting
+        - packaging
+        - validating
+        - completed
+        - editing
+        - failed
+        - cancelled
+      description: |
+        - `pending`: Job created, not started
+        - `processing`: Initial processing
+        - `extracting`: Extracting images from PDF
+        - `converting`: AI conversion in progress
+        - `packaging`: Creating RittDoc package
+        - `validating`: DTD validation
+        - `completed`: Zip package ready for download
+        - `editing`: Web editor is open (optional step)
+        - `failed`: Error occurred
+
+        Note: Conversion goes directly to `completed` with zip package ready.
+        No separate finalize step is needed.
+
+    JobInfo:
+      type: object
+      required: [job_id, status, progress, filename, created_at, updated_at]
+      properties:
+        job_id:
+          type: string
+          example: "a1b2c3d4"
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        progress:
+          type: number
+          minimum: 0
+          maximum: 100
+          example: 75.5
+        filename:
+          type: string
+          example: "document.pdf"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+          nullable: true
+        output_files:
+          type: array
+          items:
+            type: string
+        metrics:
+          type: object
+          properties:
+            pages:
+              type: integer
+            images:
+              type: integer
+            duration_seconds:
+              type: number
+        editor_url:
+          type: string
+          nullable: true
+          example: "http://localhost:5100"
+        can_edit:
+          type: boolean
+          description: True when status is completed (can launch editor for corrections)
+
+    EditorInfo:
+      type: object
+      properties:
+        job_id:
+          type: string
+        editor_url:
+          type: string
+          example: "http://localhost:5100"
+        pdf_path:
+          type: string
+        xml_path:
+          type: string
+        status:
+          type: string
+
+    FinalizeOptions:
+      type: object
+      properties:
+        skip_rittdoc:
+          type: boolean
+          default: false
+          description: Skip RittDoc ZIP packaging
+        skip_docx:
+          type: boolean
+          default: false
+          description: Skip DOCX generation
+
+    DashboardStats:
+      type: object
+      properties:
+        total_conversions:
+          type: integer
+        successful:
+          type: integer
+        failed:
+          type: integer
+        in_progress:
+          type: integer
+        total_pages_processed:
+          type: integer
+        total_images_extracted:
+          type: integer
+        average_duration_seconds:
+          type: number
+        conversions_today:
+          type: integer
+        conversions_this_week:
+          type: integer
+        recent_conversions:
+          type: array
+          items:
+            type: object
+            properties:
+              job_id:
+                type: string
+              filename:
+                type: string
+              status:
+                type: string
+              created_at:
+                type: string
+              duration_seconds:
+                type: number
+
+    ConversionDocument:
+      type: object
+      properties:
+        job_id:
+          type: string
+        filename:
+          type: string
+        status:
+          type: string
+        publisher:
+          type: string
+        book_title:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        pages:
+          type: integer
+        images:
+          type: integer
+        duration_seconds:
+          type: number
+        error:
+          type: string
+
+    ConfigOptions:
+      type: object
+      properties:
+        options:
+          type: object
+          properties:
+            model:
+              $ref: '#/components/schemas/DropdownOption'
+            dpi:
+              $ref: '#/components/schemas/DropdownOption'
+            temperature:
+              $ref: '#/components/schemas/DropdownOption'
+            batch_size:
+              $ref: '#/components/schemas/DropdownOption'
+            toc_depth:
+              $ref: '#/components/schemas/DropdownOption'
+            template_type:
+              $ref: '#/components/schemas/DropdownOption'
+            create_docx:
+              $ref: '#/components/schemas/CheckboxOption'
+            create_rittdoc:
+              $ref: '#/components/schemas/CheckboxOption'
+            skip_extraction:
+              $ref: '#/components/schemas/CheckboxOption'
+            include_toc:
+              $ref: '#/components/schemas/CheckboxOption'
+        defaults:
+          type: object
+          description: Default values for each option
+
+    DropdownOption:
+      type: object
+      properties:
+        label:
+          type: string
+          description: Display label for the field
+        description:
+          type: string
+          description: Help text
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              value:
+                oneOf:
+                  - type: string
+                  - type: number
+              label:
+                type: string
+
+    CheckboxOption:
+      type: object
+      properties:
+        label:
+          type: string
+        description:
+          type: string
+        default:
+          type: boolean
+
+    Error:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: Error message

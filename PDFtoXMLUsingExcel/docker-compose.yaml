@@ -1,0 +1,145 @@
+# PDF-to-XML Pipeline - Docker Compose
+#
+# Usage:
+#   # With external MongoDB (Atlas) - DEFAULT
+#   docker-compose up -d pipeline
+#
+#   # With local MongoDB (for development)
+#   docker-compose --profile local up -d
+#
+#   # With local MongoDB + Admin UI
+#   docker-compose --profile local --profile dev up -d
+#
+#   # View logs
+#   docker-compose logs -f pipeline
+#
+#   # Stop all services
+#   docker-compose down
+#   docker-compose down -v  # Also remove volumes
+
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # PDF-to-XML Pipeline API
+  # ==========================================================================
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdf-pipeline
+    restart: unless-stopped
+    ports:
+      - "${PIPELINE_PORT:-8000}:8000"
+    environment:
+      # Required: Anthropic API key for AI conversion
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required}
+
+      # MongoDB connection
+      # For Atlas: Set MONGODB_URI in .env file
+      # For local: Uses mongodb://mongodb:27017 when running with --profile local
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-pdf_pipeline}
+
+      # Processing settings
+      - PDFTOXML_MODEL=${PDFTOXML_MODEL:-claude-sonnet-4-20250514}
+      - PDFTOXML_DPI=${PDFTOXML_DPI:-300}
+      - PDFTOXML_TEMPERATURE=${PDFTOXML_TEMPERATURE:-0.0}
+      - PDFTOXML_BATCH_SIZE=${PDFTOXML_BATCH_SIZE:-10}
+      - PDFTOXML_MAX_CONCURRENT=${PDFTOXML_MAX_CONCURRENT:-3}
+
+      # Storage paths (inside container)
+      - PDFTOXML_UPLOAD_DIR=/data/uploads
+      - PDFTOXML_OUTPUT_DIR=/data/output
+
+      # Editor settings
+      - PDFTOXML_EDITOR_PORT_START=5100
+
+      # Webhook - notify UI when conversion completes
+      - PDFTOXML_WEBHOOK_URL=${PDFTOXML_WEBHOOK_URL:-http://demo-ui-backend:3001/api/files/webhook/complete}
+    volumes:
+      # Persistent storage for uploads and outputs
+      - pipeline-uploads:/data/uploads
+      - pipeline-output:/data/output
+      # Mount DTD folder (read-only)
+      - ./RITTDOCdtd:/app/RITTDOCdtd:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - pipeline-network
+
+  # ==========================================================================
+  # MongoDB - Local Development Only (use --profile local)
+  # ==========================================================================
+  mongodb:
+    image: mongo:7.0
+    container_name: pdf-pipeline-mongodb
+    restart: unless-stopped
+    profiles:
+      - local  # Only starts with: docker-compose --profile local up
+    ports:
+      - "${MONGODB_PORT:-27017}:27017"
+    environment:
+      # For production, uncomment and set credentials:
+      # - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:-admin}
+      # - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:-changeme}
+      - MONGO_INITDB_DATABASE=${MONGODB_DATABASE:-pdf_pipeline}
+    volumes:
+      - mongodb-data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - pipeline-network
+
+  # ==========================================================================
+  # Mongo Express - Database Admin UI (Development Only)
+  # ==========================================================================
+  mongo-express:
+    image: mongo-express:1.0
+    container_name: pdf-pipeline-mongo-express
+    restart: unless-stopped
+    profiles:
+      - dev  # Only starts with: docker-compose --profile dev up
+    ports:
+      - "${MONGO_EXPRESS_PORT:-8081}:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_PORT=27017
+      - ME_CONFIG_BASICAUTH_USERNAME=${MONGO_EXPRESS_USER:-admin}
+      - ME_CONFIG_BASICAUTH_PASSWORD=${MONGO_EXPRESS_PASSWORD:-admin}
+      # For authenticated MongoDB:
+      # - ME_CONFIG_MONGODB_ADMINUSERNAME=${MONGO_USER:-admin}
+      # - ME_CONFIG_MONGODB_ADMINPASSWORD=${MONGO_PASSWORD:-changeme}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - pipeline-network
+
+# ==========================================================================
+# Networks
+# ==========================================================================
+networks:
+  pipeline-network:
+    driver: bridge
+    name: pdf-pipeline-network
+
+# ==========================================================================
+# Volumes
+# ==========================================================================
+volumes:
+  mongodb-data:
+    name: pdf-pipeline-mongodb-data
+  pipeline-uploads:
+    name: pdf-pipeline-uploads
+  pipeline-output:
+    name: pdf-pipeline-output

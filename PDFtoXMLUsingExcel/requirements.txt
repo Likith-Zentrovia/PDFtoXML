@@ -1,0 +1,67 @@
+# =============================================================================
+# PDF to XML Pipeline (RittDoc) - Dependencies
+# =============================================================================
+# Install with: pip install -r requirements.txt
+# For production: pip install -r requirements.txt --no-cache-dir
+
+# -----------------------------------------------------------------------------
+# Core AI Service
+# -----------------------------------------------------------------------------
+anthropic>=0.40.0          # Claude Vision API client
+
+# -----------------------------------------------------------------------------
+# PDF Processing
+# -----------------------------------------------------------------------------
+PyMuPDF>=1.23.0            # PDF rendering and font extraction (fitz)
+camelot-py[base]>=0.11.0   # Table extraction from PDFs
+pypdf>=3.0.0               # PDF utilities
+Pillow>=9.0.0              # Image processing
+
+# -----------------------------------------------------------------------------
+# XML Processing & Validation
+# -----------------------------------------------------------------------------
+lxml>=4.9.0                # XML/DTD processing and validation
+
+# -----------------------------------------------------------------------------
+# Data Processing
+# -----------------------------------------------------------------------------
+pandas>=1.5.0              # Data manipulation (tables, dataframes)
+numpy>=1.23.0              # Numerical operations
+openpyxl>=3.0.0            # Excel (.xlsx) support for reports
+xlrd>=2.0.0                # Excel (.xls) legacy support
+
+# -----------------------------------------------------------------------------
+# Web API (FastAPI)
+# -----------------------------------------------------------------------------
+fastapi>=0.124.0           # REST API framework
+uvicorn>=0.38.0            # ASGI server
+pydantic>=2.0.0            # Data validation for API
+python-multipart>=0.0.9    # File upload support
+requests>=2.31.0           # HTTP client for webhooks
+
+# -----------------------------------------------------------------------------
+# Web Editor (Flask)
+# -----------------------------------------------------------------------------
+flask>=2.0.0               # Web editor server
+flask-cors>=3.0.0          # CORS support for editor
+
+# -----------------------------------------------------------------------------
+# Database (MongoDB)
+# -----------------------------------------------------------------------------
+pymongo>=4.6.0             # MongoDB driver for persistent dashboard
+
+# -----------------------------------------------------------------------------
+# System Dependencies (install separately)
+# -----------------------------------------------------------------------------
+# - poppler-utils: For PDF rendering (apt-get install poppler-utils)
+# - ghostscript: For PostScript/PDF handling (apt-get install ghostscript)
+# - pandoc: For DOCX conversion (apt-get install pandoc)
+
+# -----------------------------------------------------------------------------
+# Optional: Development Dependencies
+# -----------------------------------------------------------------------------
+# pytest>=7.0.0            # Testing
+# pytest-asyncio>=0.23.0   # Async test support
+# black>=23.0.0            # Code formatting
+# mypy>=1.0.0              # Type checking
+# ruff>=0.1.0              # Linting

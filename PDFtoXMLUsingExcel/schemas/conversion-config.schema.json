@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PDF Conversion Configuration",
+  "description": "Configuration options for PDF to XML conversion pipeline",
+  "type": "object",
+  "properties": {
+    "model": {
+      "type": "string",
+      "enum": [
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-5-20251101",
+        "claude-haiku-3-5-20241022"
+      ],
+      "default": "claude-sonnet-4-20250514",
+      "description": "Claude AI model for conversion"
+    },
+    "dpi": {
+      "type": "integer",
+      "enum": [150, 200, 300, 400, 600],
+      "default": 300,
+      "description": "PDF rendering resolution (dots per inch)"
+    },
+    "temperature": {
+      "type": "number",
+      "enum": [0.0, 0.1, 0.2, 0.3],
+      "default": 0.0,
+      "description": "AI temperature (0 = deterministic, higher = more creative)"
+    },
+    "batch_size": {
+      "type": "integer",
+      "enum": [5, 10, 15, 20, 25],
+      "default": 10,
+      "description": "Number of pages processed per API call"
+    },
+    "toc_depth": {
+      "type": "integer",
+      "enum": [1, 2, 3, 4, 5],
+      "default": 3,
+      "description": "Table of contents depth (heading levels)"
+    },
+    "template_type": {
+      "type": "string",
+      "enum": ["auto", "single_column", "double_column", "mixed"],
+      "default": "auto",
+      "description": "Document layout template"
+    },
+    "create_docx": {
+      "type": "boolean",
+      "default": true,
+      "description": "Generate Word document (.docx)"
+    },
+    "create_rittdoc": {
+      "type": "boolean",
+      "default": true,
+      "description": "Generate RittDoc DTD-compliant ZIP package"
+    },
+    "skip_extraction": {
+      "type": "boolean",
+      "default": false,
+      "description": "Skip image/table extraction for faster processing"
+    },
+    "include_toc": {
+      "type": "boolean",
+      "default": true,
+      "description": "Include table of contents in output"
+    }
+  },
+  "additionalProperties": false
+}

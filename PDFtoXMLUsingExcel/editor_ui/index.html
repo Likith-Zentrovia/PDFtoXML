@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RittDoc Editor - Professional XML/PDF Editor</title>
+    <link rel="stylesheet" href="styles.css">
+    
+    <!-- Monaco Editor -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/editor/editor.main.css">
+    
+    <!-- PDF.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+    <!-- PDF.js Text Layer CSS for selectable text -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf_viewer.min.css">
+    
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="app-header">
+        <div class="header-left">
+            <i class="fas fa-book-open"></i>
+            <h1>RittDoc Editor</h1>
+            <span class="version">v1.0</span>
+        </div>
+        <div class="header-center">
+            <div class="view-mode-toggle">
+                <button id="xmlViewBtn" class="mode-btn active" title="XML Code Editor">
+                    <i class="fas fa-code"></i> XML
+                </button>
+                <button id="htmlViewBtn" class="mode-btn" title="HTML Preview/Edit">
+                    <i class="fas fa-eye"></i> HTML Preview
+                </button>
+                <button id="htmlEditBtn" class="mode-btn" title="WYSIWYG HTML Editor">
+                    <i class="fas fa-edit"></i> HTML Edit
+                </button>
+            </div>
+        </div>
+        <div class="header-right">
+            <button id="saveBtn" class="btn btn-primary" title="Save Changes">
+                <i class="fas fa-save"></i> Save
+            </button>
+            <button id="saveReprocessBtn" class="btn btn-success" title="Save and Reprocess">
+                <i class="fas fa-sync-alt"></i> Save & Process
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="main-container">
+        <!-- Left Panel - PDF Viewer -->
+        <div class="left-panel">
+            <div class="panel-header">
+                <h2><i class="fas fa-file-pdf"></i> PDF Document</h2>
+                <div class="pdf-controls">
+                    <button id="prevPageBtn" class="control-btn" title="Previous Page">
+                        <i class="fas fa-chevron-left"></i>
+                    </button>
+                    <span class="page-info">
+                        <input type="number" id="pageNumberInput" min="1" value="1" />
+                        <span> / </span>
+                        <span id="totalPages">0</span>
+                    </span>
+                    <button id="nextPageBtn" class="control-btn" title="Next Page">
+                        <i class="fas fa-chevron-right"></i>
+                    </button>
+                    <button id="zoomOutBtn" class="control-btn" title="Zoom Out">
+                        <i class="fas fa-search-minus"></i>
+                    </button>
+                    <span class="zoom-info" id="zoomLevel">100%</span>
+                    <button id="zoomInBtn" class="control-btn" title="Zoom In">
+                        <i class="fas fa-search-plus"></i>
+                    </button>
+                    <button id="screenshotBtn" class="control-btn" title="Screenshot Mode">
+                        <i class="fas fa-camera"></i>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Main PDF Canvas with Continuous Scroll -->
+            <div class="pdf-content-wrapper">
+                <div class="pdf-viewer" id="pdfViewer">
+                    <div class="pdf-pages-container" id="pdfPagesContainer">
+                        <!-- Pages will be rendered here -->
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Thumbnail Bar (Bottom) -->
+            <div class="thumbnail-bar" id="thumbnailBar">
+                <button id="toggleThumbnailsBtn" class="thumbnail-toggle-btn" title="Show/Hide Pages">
+                    <i class="fas fa-chevron-up"></i> Pages
+                </button>
+                <div class="thumbnail-bar-content" id="thumbnailBarContent">
+                    <div class="thumbnail-list-horizontal" id="thumbnailList"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Resizer -->
+        <div class="resizer" id="resizer"></div>
+
+        <!-- Right Panel - XML/HTML Editor -->
+        <div class="right-panel">
+            <div class="panel-header">
+                <h2 id="editorTitle"><i class="fas fa-code"></i> XML Editor</h2>
+                <div class="editor-controls">
+                    <button id="formatBtn" class="control-btn" title="Format XML">
+                        <i class="fas fa-indent"></i> Format
+                    </button>
+                    <button id="validateBtn" class="control-btn" title="Validate XML">
+                        <i class="fas fa-check-circle"></i> Validate
+                    </button>
+                    <button id="refreshHtmlBtn" class="control-btn" title="Refresh HTML Preview" style="display: none;">
+                        <i class="fas fa-sync"></i> Refresh
+                    </button>
+                    <button id="blockOverlayBtn" class="control-btn" title="Toggle Block Info Overlay" onclick="toggleBlockOverlay()">
+                        <i class="fas fa-layer-group"></i> Blocks
+                    </button>
+                </div>
+            </div>
+            
+            <!-- XML Monaco Editor -->
+            <div id="xmlEditor" class="editor-container"></div>
+            
+            <!-- HTML Preview (Read-only) -->
+            <div id="htmlPreview" class="html-preview" style="display: none;"></div>
+            
+            <!-- HTML Editor (Editable) -->
+            <div id="htmlEditor" class="html-editor" style="display: none;">
+                <div class="editor-notice">
+                    <i class="fas fa-info-circle"></i>
+                    <span>Edit the HTML directly. Changes will be saved back to XML when you click Save.</span>
+                </div>
+                
+                <!-- Rich Text Editor Toolbar -->
+                <div class="rich-text-toolbar">
+                    <div class="toolbar-group">
+                        <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">
+                            <i class="fas fa-bold"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="italic" title="Italic (Ctrl+I)">
+                            <i class="fas fa-italic"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="underline" title="Underline (Ctrl+U)">
+                            <i class="fas fa-underline"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="strikeThrough" title="Strikethrough">
+                            <i class="fas fa-strikethrough"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="toolbar-separator"></div>
+                    
+                    <div class="toolbar-group">
+                        <select class="toolbar-select" id="fontSizeSelect" title="Font Size">
+                            <option value="">Size</option>
+                            <option value="1">8pt</option>
+                            <option value="2">10pt</option>
+                            <option value="3">12pt</option>
+                            <option value="4">14pt</option>
+                            <option value="5">18pt</option>
+                            <option value="6">24pt</option>
+                            <option value="7">36pt</option>
+                        </select>
+                        
+                        <select class="toolbar-select" id="fontNameSelect" title="Font Family">
+                            <option value="">Font</option>
+                            <option value="Arial">Arial</option>
+                            <option value="Times New Roman">Times New Roman</option>
+                            <option value="Courier New">Courier New</option>
+                            <option value="Georgia">Georgia</option>
+                            <option value="Verdana">Verdana</option>
+                            <option value="Helvetica">Helvetica</option>
+                        </select>
+                        
+                        <input type="color" class="toolbar-color" id="textColorPicker" title="Text Color">
+                        <input type="color" class="toolbar-color" id="bgColorPicker" title="Background Color" value="#ffffff">
+                    </div>
+                    
+                    <div class="toolbar-separator"></div>
+                    
+                    <div class="toolbar-group">
+                        <button class="toolbar-btn" data-command="justifyLeft" title="Align Left">
+                            <i class="fas fa-align-left"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="justifyCenter" title="Align Center">
+                            <i class="fas fa-align-center"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="justifyRight" title="Align Right">
+                            <i class="fas fa-align-right"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="justifyFull" title="Justify">
+                            <i class="fas fa-align-justify"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="toolbar-separator"></div>
+                    
+                    <div class="toolbar-group">
+                        <button class="toolbar-btn" data-command="insertOrderedList" title="Numbered List">
+                            <i class="fas fa-list-ol"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="insertUnorderedList" title="Bullet List">
+                            <i class="fas fa-list-ul"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="indent" title="Indent">
+                            <i class="fas fa-indent"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="outdent" title="Outdent">
+                            <i class="fas fa-outdent"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="toolbar-separator"></div>
+                    
+                    <div class="toolbar-group">
+                        <button class="toolbar-btn" onclick="insertLink()" title="Insert Link">
+                            <i class="fas fa-link"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="unlink" title="Remove Link">
+                            <i class="fas fa-unlink"></i>
+                        </button>
+                        <button class="toolbar-btn" onclick="insertTable()" title="Insert Table">
+                            <i class="fas fa-table"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="toolbar-separator"></div>
+                    
+                    <div class="toolbar-group">
+                        <button class="toolbar-btn" onclick="showMathSymbolPicker()" title="Insert Math Symbol">
+                            <i class="fas fa-square-root-alt"></i> &Sigma;
+                        </button>
+                        <button class="toolbar-btn" data-command="subscript" title="Subscript">
+                            <i class="fas fa-subscript"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="superscript" title="Superscript">
+                            <i class="fas fa-superscript"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="toolbar-separator"></div>
+                    
+                    <div class="toolbar-group">
+                        <button class="toolbar-btn" data-command="undo" title="Undo (Ctrl+Z)">
+                            <i class="fas fa-undo"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="redo" title="Redo (Ctrl+Y)">
+                            <i class="fas fa-redo"></i>
+                        </button>
+                        <button class="toolbar-btn" data-command="removeFormat" title="Clear Formatting">
+                            <i class="fas fa-remove-format"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div id="htmlEditableContent" class="html-editable-content" contenteditable="true"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Screenshot Dialog -->
+    <div id="screenshotDialog" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-camera"></i> Save Screenshot</h3>
+                <button class="modal-close" onclick="closeScreenshotDialog()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="screenshotFilename">Filename:</label>
+                    <input type="text" id="screenshotFilename" placeholder="screenshot_001.png" value="screenshot_001.png">
+                </div>
+                <div class="form-group">
+                    <label>Preview:</label>
+                    <div class="screenshot-preview">
+                        <img id="screenshotPreview" src="" alt="Screenshot preview">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Replace existing image:</label>
+                    <select id="replaceImageSelect">
+                        <option value="">-- New image --</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeScreenshotDialog()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveScreenshot()">
+                    <i class="fas fa-save"></i> Save Screenshot
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Save Confirmation Dialog -->
+    <div id="saveConfirmDialog" class="modal" style="display: none;">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3><i class="fas fa-exclamation-triangle" style="color: #f39c12;"></i> Confirm Save & Finalize</h3>
+                <button class="modal-close" onclick="closeSaveConfirmDialog()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom: 15px; font-size: 14px; line-height: 1.6;">
+                    Saving will trigger the <strong>full finalization pipeline</strong>, which includes:
+                </p>
+                <ul style="margin: 0 0 15px 20px; font-size: 13px; line-height: 1.8; color: #555;">
+                    <li>Re-packaging the XML with media files</li>
+                    <li>Running DTD validation and automatic fixes</li>
+                    <li>Creating the final RittDoc ZIP package</li>
+                    <li>Generating the Word document (DOCX)</li>
+                </ul>
+                <p style="font-size: 13px; color: #666;">
+                    <i class="fas fa-clock" style="margin-right: 5px;"></i>
+                    This process may take a few moments to complete.
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeSaveConfirmDialog()">
+                    <i class="fas fa-times"></i> Cancel
+                </button>
+                <button class="btn btn-primary" onclick="confirmSaveAndProcess()">
+                    <i class="fas fa-check"></i> Proceed
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Table Editor Toolbar (Floating) -->
+    <div id="tableEditorToolbar" class="table-editor-toolbar" style="display: none;">
+        <div class="table-toolbar-header">
+            <span class="table-toolbar-title"><i class="fas fa-table"></i> Table Editor</span>
+            <button class="table-toolbar-close" onclick="hideTableToolbar()" title="Close">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="table-toolbar-content">
+            <!-- Row Operations -->
+            <div class="table-toolbar-group">
+                <span class="toolbar-group-label">Rows</span>
+                <div class="toolbar-group-buttons">
+                    <button class="table-tool-btn" onclick="tableAddRowAbove()" title="Add Row Above">
+                        <i class="fas fa-arrow-up"></i> Above
+                    </button>
+                    <button class="table-tool-btn" onclick="tableAddRowBelow()" title="Add Row Below">
+                        <i class="fas fa-arrow-down"></i> Below
+                    </button>
+                    <button class="table-tool-btn danger" onclick="tableDeleteRow()" title="Delete Row">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </div>
+            </div>
+
+            <!-- Column Operations -->
+            <div class="table-toolbar-group">
+                <span class="toolbar-group-label">Columns</span>
+                <div class="toolbar-group-buttons">
+                    <button class="table-tool-btn" onclick="tableAddColumnLeft()" title="Add Column Left">
+                        <i class="fas fa-arrow-left"></i> Left
+                    </button>
+                    <button class="table-tool-btn" onclick="tableAddColumnRight()" title="Add Column Right">
+                        <i class="fas fa-arrow-right"></i> Right
+                    </button>
+                    <button class="table-tool-btn danger" onclick="tableDeleteColumn()" title="Delete Column">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </div>
+            </div>
+
+            <!-- Cell Operations -->
+            <div class="table-toolbar-group">
+                <span class="toolbar-group-label">Cells</span>
+                <div class="toolbar-group-buttons">
+                    <button class="table-tool-btn" onclick="tableMergeCells()" title="Merge Selected Cells">
+                        <i class="fas fa-compress-alt"></i> Merge
+                    </button>
+                    <button class="table-tool-btn" onclick="tableSplitCell()" title="Split Cell">
+                        <i class="fas fa-expand-alt"></i> Split
+                    </button>
+                    <button class="table-tool-btn" onclick="tableToggleHeaderRow()" title="Toggle Header Row">
+                        <i class="fas fa-heading"></i> Header
+                    </button>
+                </div>
+            </div>
+
+            <!-- Cell Styling -->
+            <div class="table-toolbar-group">
+                <span class="toolbar-group-label">Style</span>
+                <div class="toolbar-group-buttons">
+                    <label class="table-color-picker" title="Cell Background Color">
+                        <i class="fas fa-fill-drip"></i>
+                        <input type="color" id="cellBgColor" value="#ffffff" onchange="tableCellBgColor(this.value)">
+                    </label>
+                    <label class="table-color-picker" title="Cell Text Color">
+                        <i class="fas fa-font"></i>
+                        <input type="color" id="cellTextColor" value="#000000" onchange="tableCellTextColor(this.value)">
+                    </label>
+                    <select id="cellBorderStyle" class="table-select" onchange="tableCellBorder(this.value)" title="Border Style">
+                        <option value="">Border</option>
+                        <option value="1px solid #333">Thin</option>
+                        <option value="2px solid #333">Medium</option>
+                        <option value="3px solid #333">Thick</option>
+                        <option value="1px dashed #333">Dashed</option>
+                        <option value="none">None</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Cell Alignment -->
+            <div class="table-toolbar-group">
+                <span class="toolbar-group-label">Align</span>
+                <div class="toolbar-group-buttons">
+                    <button class="table-tool-btn" onclick="tableCellAlign('left')" title="Align Left">
+                        <i class="fas fa-align-left"></i>
+                    </button>
+                    <button class="table-tool-btn" onclick="tableCellAlign('center')" title="Align Center">
+                        <i class="fas fa-align-center"></i>
+                    </button>
+                    <button class="table-tool-btn" onclick="tableCellAlign('right')" title="Align Right">
+                        <i class="fas fa-align-right"></i>
+                    </button>
+                    <button class="table-tool-btn" onclick="tableCellVerticalAlign('top')" title="Align Top">
+                        <i class="fas fa-arrow-up"></i>
+                    </button>
+                    <button class="table-tool-btn" onclick="tableCellVerticalAlign('middle')" title="Align Middle">
+                        <i class="fas fa-minus"></i>
+                    </button>
+                    <button class="table-tool-btn" onclick="tableCellVerticalAlign('bottom')" title="Align Bottom">
+                        <i class="fas fa-arrow-down"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Table Operations -->
+            <div class="table-toolbar-group">
+                <span class="toolbar-group-label">Table</span>
+                <div class="toolbar-group-buttons">
+                    <button class="table-tool-btn" onclick="tableSetWidth()" title="Set Table Width">
+                        <i class="fas fa-arrows-alt-h"></i> Width
+                    </button>
+                    <button class="table-tool-btn danger" onclick="tableDelete()" title="Delete Entire Table">
+                        <i class="fas fa-trash-alt"></i> Delete Table
+                    </button>
+                </div>
+            </div>
+        </div>
+        <div class="table-toolbar-footer">
+            <span class="table-selection-info" id="tableSelectionInfo">Click a cell to select</span>
+        </div>
+    </div>
+
+    <!-- Math Symbol Picker Dialog -->
+    <div id="mathSymbolDialog" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-square-root-alt"></i> Insert Math Symbol</h3>
+                <button class="modal-close" onclick="closeMathSymbolDialog()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="math-symbols-grid">
+                    <!-- Greek Letters -->
+                    <div class="symbol-category">
+                        <h4>Greek Letters</h4>
+                        <div class="symbol-buttons">
+                            <button class="symbol-btn" onclick="insertSymbol('α')">α</button>
+                            <button class="symbol-btn" onclick="insertSymbol('β')">β</button>
+                            <button class="symbol-btn" onclick="insertSymbol('γ')">γ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('δ')">δ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('ε')">ε</button>
+                            <button class="symbol-btn" onclick="insertSymbol('θ')">θ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('λ')">λ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('μ')">μ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('π')">π</button>
+                            <button class="symbol-btn" onclick="insertSymbol('σ')">σ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('τ')">τ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('φ')">φ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('ω')">ω</button>
+                            <button class="symbol-btn" onclick="insertSymbol('Δ')">Δ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('Σ')">Σ</button>
+                            <button class="symbol-btn" onclick="insertSymbol('Ω')">Ω</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Math Operators -->
+                    <div class="symbol-category">
+                        <h4>Math Operators</h4>
+                        <div class="symbol-buttons">
+                            <button class="symbol-btn" onclick="insertSymbol('±')">±</button>
+                            <button class="symbol-btn" onclick="insertSymbol('×')">×</button>
+                            <button class="symbol-btn" onclick="insertSymbol('÷')">÷</button>
+                            <button class="symbol-btn" onclick="insertSymbol('≠')">≠</button>
+                            <button class="symbol-btn" onclick="insertSymbol('≈')">≈</button>
+                            <button class="symbol-btn" onclick="insertSymbol('≤')">≤</button>
+                            <button class="symbol-btn" onclick="insertSymbol('≥')">≥</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∞')">∞</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∑')">∑</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∏')">∏</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∫')">∫</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∂')">∂</button>
+                            <button class="symbol-btn" onclick="insertSymbol('√')">√</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∛')">∛</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∜')">∜</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Set Theory -->
+                    <div class="symbol-category">
+                        <h4>Set Theory</h4>
+                        <div class="symbol-buttons">
+                            <button class="symbol-btn" onclick="insertSymbol('∈')">∈</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∉')">∉</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⊂')">⊂</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⊃')">⊃</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⊆')">⊆</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⊇')">⊇</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∪')">∪</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∩')">∩</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∅')">∅</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Arrows & Logic -->
+                    <div class="symbol-category">
+                        <h4>Arrows & Logic</h4>
+                        <div class="symbol-buttons">
+                            <button class="symbol-btn" onclick="insertSymbol('→')">→</button>
+                            <button class="symbol-btn" onclick="insertSymbol('←')">←</button>
+                            <button class="symbol-btn" onclick="insertSymbol('↑')">↑</button>
+                            <button class="symbol-btn" onclick="insertSymbol('↓')">↓</button>
+                            <button class="symbol-btn" onclick="insertSymbol('↔')">↔</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⇒')">⇒</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⇐')">⇐</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⇔')">⇔</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∀')">∀</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∃')">∃</button>
+                            <button class="symbol-btn" onclick="insertSymbol('¬')">¬</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∧')">∧</button>
+                            <button class="symbol-btn" onclick="insertSymbol('∨')">∨</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Superscripts & Fractions -->
+                    <div class="symbol-category">
+                        <h4>Superscripts & Fractions</h4>
+                        <div class="symbol-buttons">
+                            <button class="symbol-btn" onclick="insertSymbol('²')">²</button>
+                            <button class="symbol-btn" onclick="insertSymbol('³')">³</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⁴')">⁴</button>
+                            <button class="symbol-btn" onclick="insertSymbol('½')">½</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⅓')">⅓</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⅔')">⅔</button>
+                            <button class="symbol-btn" onclick="insertSymbol('¼')">¼</button>
+                            <button class="symbol-btn" onclick="insertSymbol('¾')">¾</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⅛')">⅛</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⅜')">⅜</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⅝')">⅝</button>
+                            <button class="symbol-btn" onclick="insertSymbol('⅞')">⅞</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeMathSymbolDialog()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Spinner -->
+    <div id="loadingSpinner" class="loading-spinner" style="display: none;">
+        <div class="spinner"></div>
+        <p>Processing...</p>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="notificationToast" class="notification-toast"></div>
+
+    <!-- Monaco Editor Loader -->
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
+    
+    <!-- Main Application Script -->
+    <script src="app.js"></script>
+</body>
+</html>
