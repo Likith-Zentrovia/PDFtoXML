@@ -407,23 +407,48 @@ class AIPageConverter:
 
         return result
 
+    # Maximum image size for Claude API (5MB)
+    MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB in bytes
+    # DPI levels to try when image is too large
+    FALLBACK_DPI_LEVELS = [250, 200, 150, 100]
+
     def _render_page(self, pdf_path: Path, page_num: int) -> Optional[bytes]:
-        """Render a PDF page as PNG image."""
+        """
+        Render a PDF page as PNG image.
+        
+        Automatically reduces DPI if the image exceeds Claude's 5MB limit.
+        """
         try:
             doc = fitz.open(str(pdf_path))
             page = doc[page_num - 1]
-
-            # Render at configured DPI
-            zoom = self.config.ai_dpi / 72.0
-            mat = fitz.Matrix(zoom, zoom)
-
-            # Handle rotation
             rotation = page.rotation
-            if rotation:
-                mat = mat.prerotate(-rotation)
 
-            pix = page.get_pixmap(matrix=mat)
-            image_data = pix.tobytes("png")
+            # Start with configured DPI
+            current_dpi = self.config.ai_dpi
+            image_data = self._render_at_dpi(page, current_dpi, rotation)
+            
+            # Check if image is too large, reduce DPI if needed
+            if len(image_data) > self.MAX_IMAGE_SIZE:
+                print(f"    Page {page_num}: Image too large ({len(image_data)/1024/1024:.1f}MB), reducing quality...")
+                
+                for fallback_dpi in self.FALLBACK_DPI_LEVELS:
+                    if fallback_dpi >= current_dpi:
+                        continue
+                    
+                    image_data = self._render_at_dpi(page, fallback_dpi, rotation)
+                    
+                    if len(image_data) <= self.MAX_IMAGE_SIZE:
+                        print(f"    Page {page_num}: Using {fallback_dpi} DPI ({len(image_data)/1024/1024:.1f}MB)")
+                        break
+                else:
+                    # If still too large, try JPEG compression
+                    print(f"    Page {page_num}: Trying JPEG compression...")
+                    image_data = self._render_as_jpeg(page, 100, rotation, quality=85)
+                    
+                    if len(image_data) > self.MAX_IMAGE_SIZE:
+                        # Last resort: lower quality JPEG
+                        image_data = self._render_as_jpeg(page, 100, rotation, quality=70)
+                        print(f"    Page {page_num}: Using low-quality JPEG ({len(image_data)/1024/1024:.1f}MB)")
 
             doc.close()
             return image_data
@@ -431,6 +456,28 @@ class AIPageConverter:
         except Exception as e:
             print(f"  Error rendering page {page_num}: {e}")
             return None
+    
+    def _render_at_dpi(self, page: "fitz.Page", dpi: int, rotation: int) -> bytes:
+        """Render page at specific DPI as PNG."""
+        zoom = dpi / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        
+        if rotation:
+            mat = mat.prerotate(-rotation)
+        
+        pix = page.get_pixmap(matrix=mat)
+        return pix.tobytes("png")
+    
+    def _render_as_jpeg(self, page: "fitz.Page", dpi: int, rotation: int, quality: int = 85) -> bytes:
+        """Render page as JPEG with compression."""
+        zoom = dpi / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        
+        if rotation:
+            mat = mat.prerotate(-rotation)
+        
+        pix = page.get_pixmap(matrix=mat)
+        return pix.tobytes("jpeg", quality)
 
     def _call_vision_api(
         self,
@@ -441,6 +488,12 @@ class AIPageConverter:
         """Call Claude Vision API to extract content."""
         # Encode image to base64
         image_base64 = base64.b64encode(image_data).decode('utf-8')
+        
+        # Detect image type from magic bytes
+        if image_data[:3] == b'\xff\xd8\xff':
+            media_type = "image/jpeg"
+        else:
+            media_type = "image/png"
 
         # Build prompt
         prompt = AI_EXTRACTION_PROMPT.replace("{PAGE_NUMBER}", str(page_num))
@@ -457,7 +510,7 @@ class AIPageConverter:
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/png",
+                            "media_type": media_type,
                             "data": image_base64
                         }
                     },
