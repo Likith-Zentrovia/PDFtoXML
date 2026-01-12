@@ -407,10 +407,11 @@ class AIPageConverter:
 
         return result
 
-    # Maximum image size for Claude API (5MB)
-    MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB in bytes
+    # Maximum image size for Claude API (5MB limit is for base64-encoded image)
+    # Base64 encoding adds ~33% overhead, so we target 3.7MB raw to stay under 5MB encoded
+    MAX_IMAGE_SIZE = int(3.7 * 1024 * 1024)  # ~3.7MB raw = ~5MB base64
     # DPI levels to try when image is too large
-    FALLBACK_DPI_LEVELS = [250, 200, 150, 100]
+    FALLBACK_DPI_LEVELS = [200, 150, 120, 100, 75]
 
     def _render_page(self, pdf_path: Path, page_num: int) -> Optional[bytes]:
         """
