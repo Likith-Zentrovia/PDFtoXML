@@ -739,6 +739,7 @@ class HybridConversionRouter:
         # Convert to DocBook XML
         if self.config.create_merged_xml:
             xml_path = output_dir / f"{pdf_path.stem}_hybrid_docbook42.xml"
+            
             # Collect all extracted images from page results
             all_images = []
             for page_num in sorted(result.page_results.keys()):
@@ -746,7 +747,21 @@ class HybridConversionRouter:
                 if page_result.images:
                     all_images.extend(page_result.images)
             
-            self._convert_to_docbook(merged_content, xml_path, pdf_path.stem, all_images)
+            # Also scan the multimedia folder for any images we might have missed
+            if multimedia_dir.exists():
+                image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'}
+                for img_file in multimedia_dir.iterdir():
+                    if img_file.suffix.lower() in image_extensions:
+                        img_path_str = str(img_file)
+                        if img_path_str not in all_images:
+                            all_images.append(img_path_str)
+                            if self.config.verbose:
+                                print(f"  Found image in MultiMedia: {img_file.name}")
+            
+            if self.config.verbose and all_images:
+                print(f"  Total images to include: {len(all_images)}")
+            
+            self._convert_to_docbook(merged_content, xml_path, pdf_path.stem, all_images, multimedia_dir)
             result.merged_xml_path = str(xml_path)
 
         # Collect failed pages
@@ -956,10 +971,27 @@ class HybridConversionRouter:
         markdown_content: str,
         output_path: Path,
         title: str,
-        extracted_images: List[str] = None
+        extracted_images: List[str] = None,
+        multimedia_dir: Path = None
     ) -> None:
-        """Convert merged markdown to DocBook XML."""
+        """Convert merged markdown to DocBook XML with proper image references."""
         extracted_images = extracted_images or []
+        
+        # Group images by page number for intelligent placement
+        images_by_page: Dict[int, List[str]] = {}
+        unassigned_images: List[str] = []
+        
+        for img_path in extracted_images:
+            img_name = Path(img_path).name
+            # Try to extract page number from filename (e.g., page1_img1.png, p5_image2.jpg)
+            page_match = re.search(r'(?:page|p)(\d+)', img_name, re.IGNORECASE)
+            if page_match:
+                page_num = int(page_match.group(1))
+                if page_num not in images_by_page:
+                    images_by_page[page_num] = []
+                images_by_page[page_num].append(img_path)
+            else:
+                unassigned_images.append(img_path)
         
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
@@ -973,8 +1005,23 @@ class HybridConversionRouter:
             '  <title>Content</title>',
         ]
         
-        # Track which images we've added
+        # Track which images we've added and current page
         images_added = set()
+        current_page = 0
+
+        # Helper function to add images for a page
+        def add_page_images(page_num: int):
+            """Add all images for a specific page."""
+            if page_num in images_by_page:
+                for img_path in images_by_page[page_num]:
+                    if img_path not in images_added:
+                        img_filename = Path(img_path).name
+                        lines.append(f"  <mediaobject>")
+                        lines.append(f"    <imageobject>")
+                        lines.append(f"      <imagedata fileref=\"MultiMedia/{img_filename}\"/>")
+                        lines.append(f"    </imageobject>")
+                        lines.append(f"  </mediaobject>")
+                        images_added.add(img_path)
 
         # Convert markdown paragraphs to DocBook
         paragraphs = markdown_content.split("\n\n")
@@ -984,6 +1031,15 @@ class HybridConversionRouter:
             para = para.strip()
             if not para:
                 continue
+
+            # Check for page markers to track current page (but don't output them)
+            page_marker_match = re.search(r'<!--.*?[Pp]age\s*(\d+)', para)
+            if page_marker_match:
+                new_page = int(page_marker_match.group(1))
+                # Add images from previous page before moving to new page
+                if current_page > 0 and current_page != new_page:
+                    add_page_images(current_page)
+                current_page = new_page
 
             # Skip all internal comments (page markers, pipeline info, etc.)
             if para.startswith("<!--"):
@@ -1004,18 +1060,24 @@ class HybridConversionRouter:
                 lines.append(f"  <sect3><title>{self._escape_xml(text)}</title></sect3>")
             elif para.startswith("<!-- IMAGE:"):
                 # Convert image marker to DocBook mediaobject
-                # Try to find an actual extracted image for this marker
                 desc_match = re.search(r'<!-- IMAGE:\s*(.+?)\s*-->', para)
                 desc = desc_match.group(1) if desc_match else "Image"
                 desc = self._escape_xml(desc)
                 
-                # Find an unused extracted image
+                # First try to find an image from current page
                 image_to_use = None
-                for img_path in extracted_images:
-                    if img_path not in images_added:
-                        image_to_use = img_path
-                        images_added.add(img_path)
-                        break
+                if current_page in images_by_page:
+                    for img_path in images_by_page[current_page]:
+                        if img_path not in images_added:
+                            image_to_use = img_path
+                            break
+                
+                # Fallback to any unused image
+                if not image_to_use:
+                    for img_path in extracted_images:
+                        if img_path not in images_added:
+                            image_to_use = img_path
+                            break
                 
                 if image_to_use:
                     img_filename = Path(image_to_use).name
@@ -1025,6 +1087,7 @@ class HybridConversionRouter:
                     lines.append(f"    </imageobject>")
                     lines.append(f"    <textobject><phrase>{desc}</phrase></textobject>")
                     lines.append(f"  </mediaobject>")
+                    images_added.add(image_to_use)
             elif para.startswith("<!-- TABLE"):
                 # Skip internal table markers (tables should be in HTML format)
                 continue
@@ -1063,20 +1126,36 @@ class HybridConversionRouter:
                     text = re.sub(r'\*(.+?)\*', r'<emphasis>\1</emphasis>', text)
                     lines.append(f"  <para>{text}</para>")
 
+        # Add images from the last page
+        if current_page > 0:
+            add_page_images(current_page)
+
         if in_section:
             lines.append("  </sect1>")
 
-        # Add any remaining extracted images that weren't matched to IMAGE markers
-        remaining_images = [img for img in extracted_images if img not in images_added]
-        if remaining_images:
-            lines.append("  <sect1><title>Images</title>")
-            for img_path in remaining_images:
+        # Add any remaining extracted images that weren't matched
+        # This includes unassigned images and any page images not yet added
+        all_remaining = []
+        for img_path in extracted_images:
+            if img_path not in images_added:
+                all_remaining.append(img_path)
+        for img_path in unassigned_images:
+            if img_path not in images_added:
+                all_remaining.append(img_path)
+        
+        if all_remaining:
+            lines.append("  <sect1 id=\"extracted-images\"><title>Extracted Images</title>")
+            for img_path in all_remaining:
                 img_filename = Path(img_path).name
-                lines.append(f"  <mediaobject>")
-                lines.append(f"    <imageobject>")
-                lines.append(f"      <imagedata fileref=\"MultiMedia/{img_filename}\"/>")
-                lines.append(f"    </imageobject>")
-                lines.append(f"  </mediaobject>")
+                lines.append(f"    <figure>")
+                lines.append(f"      <title>{self._escape_xml(img_filename)}</title>")
+                lines.append(f"      <mediaobject>")
+                lines.append(f"        <imageobject>")
+                lines.append(f"          <imagedata fileref=\"MultiMedia/{img_filename}\" width=\"100%\" scalefit=\"1\"/>")
+                lines.append(f"        </imageobject>")
+                lines.append(f"      </mediaobject>")
+                lines.append(f"    </figure>")
+                images_added.add(img_path)
             lines.append("  </sect1>")
 
         lines.extend([
