@@ -248,7 +248,7 @@ class NonAIPageConverter:
         return result
 
     def _extract_text_with_formatting(self, page: fitz.Page, page_num: int) -> str:
-        """Extract text from page with markdown formatting."""
+        """Extract text from page - clean text without markdown artifacts."""
         lines = [f"<!-- Page {page_num} -->", ""]
 
         # Get text as dictionary for detailed information
@@ -261,40 +261,77 @@ class NonAIPageConverter:
 
             block_lines = []
             for line in block.get("lines", []):
-                line_text = ""
+                # Collect all spans with their formatting info
+                spans_data = []
                 line_size = 0
 
                 for span in line.get("spans", []):
                     text = span.get("text", "")
-                    font = span.get("font", "")
+                    if not text:
+                        continue
+                    font = span.get("font", "").lower()
                     size = span.get("size", 12)
                     flags = span.get("flags", 0)
 
                     line_size = max(line_size, size)
 
-                    # Apply formatting based on font properties
-                    is_bold = "bold" in font.lower() or (flags & 16)
-                    is_italic = "italic" in font.lower() or (flags & 2)
+                    # Detect formatting
+                    is_bold = "bold" in font or (flags & 16)
+                    is_italic = "italic" in font or "oblique" in font or (flags & 2)
 
-                    if is_bold and is_italic:
+                    spans_data.append({
+                        "text": text,
+                        "bold": is_bold,
+                        "italic": is_italic
+                    })
+
+                # Build line text by merging consecutive spans with same formatting
+                if not spans_data:
+                    continue
+
+                # Merge consecutive spans with same formatting to avoid **a****b** artifacts
+                merged_spans = []
+                current = spans_data[0].copy()
+                
+                for span in spans_data[1:]:
+                    # If same formatting, merge text
+                    if span["bold"] == current["bold"] and span["italic"] == current["italic"]:
+                        current["text"] += span["text"]
+                    else:
+                        merged_spans.append(current)
+                        current = span.copy()
+                merged_spans.append(current)
+
+                # Build the line with clean formatting
+                line_parts = []
+                for span in merged_spans:
+                    text = span["text"]
+                    # Only apply formatting to significant text (not just punctuation/whitespace)
+                    text_content = text.strip()
+                    if span["bold"] and span["italic"] and text_content and len(text_content) > 1:
                         text = f"***{text}***"
-                    elif is_bold:
+                    elif span["bold"] and text_content and len(text_content) > 1:
                         text = f"**{text}**"
-                    elif is_italic:
+                    elif span["italic"] and text_content and len(text_content) > 1:
                         text = f"*{text}*"
+                    line_parts.append(text)
 
-                    line_text += text
+                line_text = "".join(line_parts).strip()
 
-                # Detect headings by font size
-                line_text = line_text.strip()
+                # Clean up any residual markdown artifacts
+                # Remove empty emphasis markers
+                line_text = re.sub(r'\*{2,}(?=\s|$)', '', line_text)
+                line_text = re.sub(r'(?:^|\s)\*{2,}', ' ', line_text)
+                # Merge adjacent markers: **text****more** -> **text more**
+                line_text = re.sub(r'\*\*\*\*+', ' ', line_text)
+                line_text = re.sub(r'\*\*\s+\*\*', ' ', line_text)
+                
                 if line_text:
+                    # Detect headings by font size
                     if line_size >= 18:
-                        line_text = f"# {line_text} <!-- font:{int(line_size)} -->"
+                        line_text = f"# {line_text}"
                     elif line_size >= 14:
-                        line_text = f"## {line_text} <!-- font:{int(line_size)} -->"
-                    elif line_size >= 12 and len(line_text) < 100:
-                        # Could be a subheading
-                        pass
+                        line_text = f"## {line_text}"
 
                     block_lines.append(line_text)
 
@@ -317,21 +354,35 @@ class NonAIPageConverter:
         images = page.get_images(full=True)
         extracted = []
 
+        # Ensure output directory exists
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
         for img_idx, img in enumerate(images, 1):
             try:
                 xref = img[0]
                 base_image = doc.extract_image(xref)
-                if base_image:
+                if base_image and base_image.get("image"):
+                    # Get image data
+                    img_data = base_image["image"]
                     ext = base_image.get("ext", "png")
+                    
+                    # Skip tiny images (likely icons/decorations)
+                    width = base_image.get("width", 0)
+                    height = base_image.get("height", 0)
+                    if width < 50 and height < 50:
+                        continue
+                    
                     filename = f"page{page_num}_img{img_idx}.{ext}"
                     filepath = output_dir / filename
 
                     with open(filepath, "wb") as f:
-                        f.write(base_image["image"])
+                        f.write(img_data)
 
                     extracted.append(str(filepath))
-            except Exception:
-                pass
+                    print(f"    Extracted image: {filename} ({width}x{height})")
+            except Exception as e:
+                print(f"    Warning: Could not extract image {img_idx} from page {page_num}: {e}")
 
         return extracted
 
@@ -788,10 +839,9 @@ class HybridConversionRouter:
         """Convert pages using the AI pipeline."""
         results = {}
 
-        # Get total page count
+        # Get total page count and keep doc open for image extraction
         doc = fitz.open(str(pdf_path))
         total_pages = len(doc)
-        doc.close()
 
         # Process each page
         for page_num in pages:
@@ -802,6 +852,16 @@ class HybridConversionRouter:
                 result = self.ai_converter.convert_page(
                     pdf_path, page_num, total_pages, multimedia_dir
                 )
+                
+                # Also extract embedded images from AI pages
+                if result.success:
+                    page = doc[page_num - 1]
+                    images = self._extract_ai_page_images(page, page_num, multimedia_dir, doc)
+                    if images:
+                        result.images = images
+                        if self.config.verbose:
+                            print(f"    Extracted {len(images)} images from page {page_num}")
+                
                 results[page_num] = result
 
                 if not result.success:
@@ -817,7 +877,50 @@ class HybridConversionRouter:
                 )
                 print(f"  Error extracting page {page_num}: {e}")
 
+        doc.close()
         return results
+
+    def _extract_ai_page_images(
+        self,
+        page: fitz.Page,
+        page_num: int,
+        output_dir: Path,
+        doc: fitz.Document
+    ) -> List[str]:
+        """Extract images from an AI-processed page."""
+        images = page.get_images(full=True)
+        extracted = []
+
+        # Ensure output directory exists
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for img_idx, img in enumerate(images, 1):
+            try:
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                if base_image and base_image.get("image"):
+                    img_data = base_image["image"]
+                    ext = base_image.get("ext", "png")
+                    
+                    # Skip tiny images
+                    width = base_image.get("width", 0)
+                    height = base_image.get("height", 0)
+                    if width < 50 and height < 50:
+                        continue
+                    
+                    filename = f"page{page_num}_img{img_idx}.{ext}"
+                    filepath = output_dir / filename
+
+                    with open(filepath, "wb") as f:
+                        f.write(img_data)
+
+                    extracted.append(str(filepath))
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"    Warning: Could not extract image {img_idx}: {e}")
+
+        return extracted
 
     def _merge_results(
         self,
