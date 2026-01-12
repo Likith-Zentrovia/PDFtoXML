@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hybrid Conversion Router for PDF to XML Conversion
+Hybrid Conversion Router for PDF to XML Conversion (v2.0)
 
 This module routes PDF pages between AI and non-AI conversion pipelines
 based on page complexity analysis. Complex pages (with tables, images,
@@ -8,10 +8,10 @@ complex layouts) go to the AI pipeline for better accuracy, while simple
 text-only pages use the faster non-AI pipeline.
 
 Architecture:
-    1. Analyze PDF → Determine complexity per page
-    2. Route complex pages → AI Pipeline (Claude Vision)
-    3. Route simple pages → Non-AI Pipeline (PyMuPDF text extraction)
-    4. Merge results → Unified DocBook XML output
+    1. Analyze PDF -> Determine complexity per page
+    2. Route complex pages -> AI Pipeline (Claude Vision)
+    3. Route simple pages -> Non-AI Pipeline (PyMuPDF text extraction)
+    4. Merge results -> Unified DocBook XML output
 
 Usage:
     from hybrid_conversion_router import HybridConversionRouter
@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import tempfile
+import base64
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -38,6 +39,13 @@ try:
     HAS_FITZ = True
 except ImportError:
     HAS_FITZ = False
+
+# Anthropic API for AI conversion
+try:
+    import anthropic
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
 
 # Import complexity analyzer
 from page_complexity_analyzer import (
@@ -138,11 +146,50 @@ class HybridConversionResult:
         return "\n".join(lines)
 
 
+# AI Extraction Prompt (simplified version for hybrid mode)
+AI_EXTRACTION_PROMPT = """You are a precise document text extractor. Extract ALL text content from this PDF page image exactly as it appears.
+
+## RULES:
+1. Extract text with exact formatting (indentation, bullets, lists)
+2. Preserve special characters, superscripts, subscripts
+3. For multi-column layouts, read left-to-right, top-to-bottom
+4. Mark column breaks with: <!-- COLUMN_BREAK -->
+5. Include ALL footnotes at the bottom
+6. Do NOT add, edit, or improve any text
+
+## TABLES:
+For tables, use HTML format:
+<!-- TABLE_START -->
+<table>
+  <thead><tr><th>Header</th></tr></thead>
+  <tbody><tr><td>Cell</td></tr></tbody>
+</table>
+<!-- TABLE_END -->
+
+## IMAGES:
+Mark image positions with: <!-- IMAGE: description -->
+
+## OUTPUT FORMAT:
+Use Markdown with font size annotations for headings:
+# Heading <!-- font:24 -->
+## Subheading <!-- font:18 -->
+
+Regular paragraph text...
+
+- Bullet items
+1. Numbered items
+
+Output ONLY the extracted content, no explanations.
+
+<!-- Page {PAGE_NUMBER} -->
+"""
+
+
 class NonAIPageConverter:
     """
     Non-AI page converter using PyMuPDF for text extraction.
 
-    This is a simplified, fast converter for pages with straightforward
+    This is a fast converter for pages with straightforward
     text content. It extracts text with basic formatting preservation
     but doesn't handle complex tables or layouts well.
     """
@@ -181,18 +228,18 @@ class NonAIPageConverter:
             page = doc[page_num - 1]
 
             # Extract text with formatting
-            content = self._extract_text_with_formatting(page)
+            content = self._extract_text_with_formatting(page, page_num)
 
             # Extract images if enabled
             if self.config.nonai_extract_images:
-                images = self._extract_page_images(page, page_num, output_dir)
+                images = self._extract_page_images(page, page_num, output_dir, doc)
                 result.images = images
 
             doc.close()
 
             result.content = content
             result.success = True
-            result.confidence = 0.95  # Non-AI has high confidence for simple text
+            result.confidence = 0.85  # Non-AI has good confidence for simple text
 
         except Exception as e:
             result.error = str(e)
@@ -200,13 +247,13 @@ class NonAIPageConverter:
 
         return result
 
-    def _extract_text_with_formatting(self, page: fitz.Page) -> str:
-        """Extract text from page with basic markdown formatting."""
+    def _extract_text_with_formatting(self, page: fitz.Page, page_num: int) -> str:
+        """Extract text from page with markdown formatting."""
+        lines = [f"<!-- Page {page_num} -->", ""]
+
+        # Get text as dictionary for detailed information
         text_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
         blocks = text_dict.get("blocks", [])
-
-        lines = []
-        current_para = []
 
         for block in blocks:
             if block.get("type") != 0:  # Skip non-text blocks
@@ -215,11 +262,15 @@ class NonAIPageConverter:
             block_lines = []
             for line in block.get("lines", []):
                 line_text = ""
+                line_size = 0
+
                 for span in line.get("spans", []):
                     text = span.get("text", "")
                     font = span.get("font", "")
                     size = span.get("size", 12)
                     flags = span.get("flags", 0)
+
+                    line_size = max(line_size, size)
 
                     # Apply formatting based on font properties
                     is_bold = "bold" in font.lower() or (flags & 16)
@@ -234,21 +285,33 @@ class NonAIPageConverter:
 
                     line_text += text
 
-                block_lines.append(line_text)
+                # Detect headings by font size
+                line_text = line_text.strip()
+                if line_text:
+                    if line_size >= 18:
+                        line_text = f"# {line_text} <!-- font:{int(line_size)} -->"
+                    elif line_size >= 14:
+                        line_text = f"## {line_text} <!-- font:{int(line_size)} -->"
+                    elif line_size >= 12 and len(line_text) < 100:
+                        # Could be a subheading
+                        pass
+
+                    block_lines.append(line_text)
 
             # Join lines within block
             block_text = "\n".join(block_lines)
             if block_text.strip():
                 lines.append(block_text)
+                lines.append("")  # Blank line between blocks
 
-        # Join blocks with paragraph breaks
-        return "\n\n".join(lines)
+        return "\n".join(lines)
 
     def _extract_page_images(
         self,
         page: fitz.Page,
         page_num: int,
-        output_dir: Path
+        output_dir: Path,
+        doc: fitz.Document
     ) -> List[str]:
         """Extract images from a page."""
         images = page.get_images(full=True)
@@ -257,7 +320,7 @@ class NonAIPageConverter:
         for img_idx, img in enumerate(images, 1):
             try:
                 xref = img[0]
-                base_image = page.parent.extract_image(xref)
+                base_image = doc.extract_image(xref)
                 if base_image:
                     ext = base_image.get("ext", "png")
                     filename = f"page{page_num}_img{img_idx}.{ext}"
@@ -271,6 +334,151 @@ class NonAIPageConverter:
                 pass
 
         return extracted
+
+
+class AIPageConverter:
+    """
+    AI page converter using Claude Vision API.
+
+    This converter processes pages using the Claude Vision API
+    for accurate text extraction from complex layouts.
+    """
+
+    def __init__(self, config: HybridConfig):
+        if not HAS_ANTHROPIC:
+            raise ImportError("anthropic package is required. Install with: pip install anthropic")
+
+        self.config = config
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
+
+        self.client = anthropic.Anthropic(api_key=api_key)
+
+    def convert_page(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        total_pages: int,
+        output_dir: Path
+    ) -> PageConversionResult:
+        """
+        Convert a single page using Claude Vision AI.
+
+        Args:
+            pdf_path: Path to PDF file
+            page_num: 1-based page number
+            total_pages: Total number of pages in PDF
+            output_dir: Output directory
+
+        Returns:
+            PageConversionResult with extracted content
+        """
+        result = PageConversionResult(
+            page_num=page_num,
+            pipeline="ai",
+            success=False,
+            content=""
+        )
+
+        try:
+            # Render page as image
+            image_data = self._render_page(pdf_path, page_num)
+            if image_data is None:
+                result.error = f"Failed to render page {page_num}"
+                return result
+
+            # Call Claude Vision API
+            content = self._call_vision_api(image_data, page_num, total_pages)
+
+            result.content = content
+            result.success = True
+            result.confidence = 0.95
+
+            # Extract tables from content
+            result.tables = self._extract_tables_from_content(content)
+
+        except anthropic.AuthenticationError as e:
+            result.error = f"Authentication error: {e}"
+        except anthropic.APIError as e:
+            result.error = f"API error: {e}"
+        except Exception as e:
+            result.error = str(e)
+
+        return result
+
+    def _render_page(self, pdf_path: Path, page_num: int) -> Optional[bytes]:
+        """Render a PDF page as PNG image."""
+        try:
+            doc = fitz.open(str(pdf_path))
+            page = doc[page_num - 1]
+
+            # Render at configured DPI
+            zoom = self.config.ai_dpi / 72.0
+            mat = fitz.Matrix(zoom, zoom)
+
+            # Handle rotation
+            rotation = page.rotation
+            if rotation:
+                mat = mat.prerotate(-rotation)
+
+            pix = page.get_pixmap(matrix=mat)
+            image_data = pix.tobytes("png")
+
+            doc.close()
+            return image_data
+
+        except Exception as e:
+            print(f"  Error rendering page {page_num}: {e}")
+            return None
+
+    def _call_vision_api(
+        self,
+        image_data: bytes,
+        page_num: int,
+        total_pages: int
+    ) -> str:
+        """Call Claude Vision API to extract content."""
+        # Encode image to base64
+        image_base64 = base64.b64encode(image_data).decode('utf-8')
+
+        # Build prompt
+        prompt = AI_EXTRACTION_PROMPT.replace("{PAGE_NUMBER}", str(page_num))
+        prompt += f"\n\nThis is page {page_num} of {total_pages}."
+
+        response = self.client.messages.create(
+            model=self.config.ai_model,
+            max_tokens=self.config.ai_max_tokens,
+            temperature=self.config.ai_temperature,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_base64
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }]
+        )
+
+        return response.content[0].text
+
+    def _extract_tables_from_content(self, content: str) -> List[str]:
+        """Extract HTML tables from content."""
+        tables = []
+        pattern = r'<!-- TABLE_START -->(.*?)<!-- TABLE_END -->'
+        matches = re.findall(pattern, content, re.DOTALL)
+        for match in matches:
+            tables.append(match.strip())
+        return tables
 
 
 class HybridConversionRouter:
@@ -300,6 +508,15 @@ class HybridConversionRouter:
             verbose=self.config.verbose
         )
         self.nonai_converter = NonAIPageConverter(self.config)
+
+        # Initialize AI converter only if API key is available
+        self.ai_converter = None
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            try:
+                self.ai_converter = AIPageConverter(self.config)
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"  Warning: AI converter not available: {e}")
 
     def convert_pdf(
         self,
@@ -374,18 +591,35 @@ class HybridConversionRouter:
             for page_num, page_result in nonai_results.items():
                 if not page_result.success and self.config.ai_fallback_enabled:
                     if self.config.verbose:
-                        print(f"  Page {page_num} failed, falling back to AI...")
+                        print(f"  Page {page_num} failed, marking for AI fallback...")
                     if page_num not in ai_pages:
                         ai_pages.append(page_num)
-                        nonai_pages.remove(page_num)
+                        if page_num in nonai_pages:
+                            nonai_pages.remove(page_num)
 
         # Step 4: Convert AI pages
         if ai_pages:
             if self.config.verbose:
                 print(f"\nStep 4: Converting {len(ai_pages)} pages with AI pipeline...")
 
-            ai_results = self._convert_ai_pages(pdf_path, ai_pages, output_dir, multimedia_dir)
-            result.page_results.update(ai_results)
+            if self.ai_converter is None:
+                if self.config.verbose:
+                    print("  Warning: AI converter not available (API key not set)")
+                    print("  AI pages will be skipped or use non-AI fallback")
+
+                # Try non-AI fallback for AI pages
+                for page_num in ai_pages:
+                    if page_num not in result.page_results:
+                        fallback_result = self.nonai_converter.convert_page(
+                            pdf_path, page_num, multimedia_dir
+                        )
+                        fallback_result.pipeline = "nonai-fallback"
+                        result.page_results[page_num] = fallback_result
+            else:
+                ai_results = self._convert_ai_pages(
+                    pdf_path, ai_pages, output_dir, multimedia_dir
+                )
+                result.page_results.update(ai_results)
 
         # Step 5: Merge results
         if self.config.verbose:
@@ -497,91 +731,37 @@ class HybridConversionRouter:
         output_dir: Path,
         multimedia_dir: Path
     ) -> Dict[int, PageConversionResult]:
-        """
-        Convert pages using the AI pipeline.
-
-        This imports and uses the existing ai_pdf_conversion_service.
-        """
+        """Convert pages using the AI pipeline."""
         results = {}
 
-        try:
-            # Import AI conversion service
-            from ai_pdf_conversion_service import (
-                ClaudeVisionProcessor,
-                VisionConfig,
-                render_pdf_page,
-            )
+        # Get total page count
+        doc = fitz.open(str(pdf_path))
+        total_pages = len(doc)
+        doc.close()
 
-            # Configure AI processor
-            ai_config = VisionConfig(
-                model=self.config.ai_model,
-                dpi=self.config.ai_dpi,
-                temperature=self.config.ai_temperature,
-                max_tokens=self.config.ai_max_tokens,
-                batch_size=self.config.ai_batch_size,
-            )
+        # Process each page
+        for page_num in pages:
+            if self.config.verbose:
+                print(f"  Processing page {page_num} with AI...")
 
-            processor = ClaudeVisionProcessor(config=ai_config)
+            try:
+                result = self.ai_converter.convert_page(
+                    pdf_path, page_num, total_pages, multimedia_dir
+                )
+                results[page_num] = result
 
-            # Get total page count
-            doc = fitz.open(str(pdf_path))
-            total_pages = len(doc)
-            doc.close()
+                if not result.success:
+                    print(f"  Error extracting page {page_num}: {result.error}")
 
-            # Process each page
-            for page_num in pages:
-                if self.config.verbose:
-                    print(f"  Processing page {page_num} with AI...")
-
-                try:
-                    # Render page as image
-                    image_data = render_pdf_page(
-                        pdf_path,
-                        page_num,
-                        dpi=ai_config.dpi,
-                        crop_header_pct=ai_config.crop_header_pct,
-                        crop_footer_pct=ai_config.crop_footer_pct,
-                    )
-
-                    if image_data is None:
-                        raise ValueError(f"Failed to render page {page_num}")
-
-                    # Extract content using AI
-                    extraction = processor.extract_page_content(
-                        image_data,
-                        page_num,
-                        total_pages
-                    )
-
-                    results[page_num] = PageConversionResult(
-                        page_num=page_num,
-                        pipeline="ai",
-                        success=not extraction.get("error"),
-                        content=extraction.get("content", ""),
-                        tables=[t.get("html", "") for t in extraction.get("tables", [])],
-                        confidence=extraction.get("confidence", 0.9),
-                        error=extraction.get("error"),
-                    )
-
-                except Exception as e:
-                    results[page_num] = PageConversionResult(
-                        page_num=page_num,
-                        pipeline="ai",
-                        success=False,
-                        content="",
-                        error=str(e)
-                    )
-
-        except ImportError as e:
-            # AI service not available - return all as failed
-            for page_num in pages:
+            except Exception as e:
                 results[page_num] = PageConversionResult(
                     page_num=page_num,
                     pipeline="ai",
                     success=False,
                     content="",
-                    error=f"AI service import failed: {e}"
+                    error=str(e)
                 )
+                print(f"  Error extracting page {page_num}: {e}")
 
         return results
 
@@ -596,26 +776,19 @@ class HybridConversionRouter:
         for page_num in range(1, total_pages + 1):
             result = page_results.get(page_num)
 
-            lines.append(f"\n<!-- PAGE {page_num} -->\n")
-
             if result is None:
-                lines.append(f"<!-- ERROR: No result for page {page_num} -->\n")
+                lines.append(f"\n<!-- PAGE {page_num} - NO RESULT -->\n")
                 continue
 
             if not result.success:
-                lines.append(f"<!-- ERROR: Page {page_num} failed: {result.error} -->\n")
+                lines.append(f"\n<!-- PAGE {page_num} - ERROR: {result.error} -->\n")
                 continue
 
             # Add pipeline marker
-            lines.append(f"<!-- Pipeline: {result.pipeline.upper()} -->\n")
+            lines.append(f"\n<!-- PAGE {page_num} - Pipeline: {result.pipeline.upper()} -->\n")
 
             # Add content
             lines.append(result.content)
-
-            # Add tables if any
-            for table in result.tables:
-                lines.append("\n")
-                lines.append(table)
 
         return "\n".join(lines)
 
@@ -626,7 +799,6 @@ class HybridConversionRouter:
         title: str
     ) -> None:
         """Convert merged markdown to DocBook XML."""
-        # Simple conversion - for full conversion, use the AI service converter
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"',
@@ -641,32 +813,67 @@ class HybridConversionRouter:
 
         # Convert markdown paragraphs to DocBook
         paragraphs = markdown_content.split("\n\n")
+        in_section = False
+
         for para in paragraphs:
             para = para.strip()
             if not para:
                 continue
 
-            # Skip comments
+            # Skip comments but preserve page markers
             if para.startswith("<!--"):
-                lines.append(f"  {para}")
+                if "PAGE" in para:
+                    lines.append(f"  {para}")
                 continue
 
             # Handle headings
             if para.startswith("# "):
-                text = para[2:].strip()
-                lines.append(f"  <sect1><title>{self._escape_xml(text)}</title></sect1>")
+                if in_section:
+                    lines.append("  </sect1>")
+                text = re.sub(r'\s*<!--.*?-->\s*', '', para[2:]).strip()
+                lines.append(f"  <sect1><title>{self._escape_xml(text)}</title>")
+                in_section = True
             elif para.startswith("## "):
-                text = para[3:].strip()
+                text = re.sub(r'\s*<!--.*?-->\s*', '', para[3:]).strip()
                 lines.append(f"  <sect2><title>{self._escape_xml(text)}</title></sect2>")
             elif para.startswith("### "):
-                text = para[4:].strip()
+                text = re.sub(r'\s*<!--.*?-->\s*', '', para[4:]).strip()
                 lines.append(f"  <sect3><title>{self._escape_xml(text)}</title></sect3>")
-            elif para.startswith("<table"):
+            elif para.startswith("<!-- TABLE"):
+                # Pass through table markers
+                lines.append(f"  {para}")
+            elif "<table" in para.lower():
                 # Pass through HTML tables
                 lines.append(f"  {para}")
+            elif para.startswith("- ") or para.startswith("* "):
+                # Convert bullet list
+                items = [p.strip()[2:] for p in para.split("\n") if p.strip().startswith(("- ", "* "))]
+                if items:
+                    lines.append("  <itemizedlist>")
+                    for item in items:
+                        lines.append(f"    <listitem><para>{self._escape_xml(item)}</para></listitem>")
+                    lines.append("  </itemizedlist>")
+            elif re.match(r'^\d+\.\s', para):
+                # Convert numbered list
+                items = re.findall(r'^\d+\.\s*(.+)$', para, re.MULTILINE)
+                if items:
+                    lines.append("  <orderedlist>")
+                    for item in items:
+                        lines.append(f"    <listitem><para>{self._escape_xml(item)}</para></listitem>")
+                    lines.append("  </orderedlist>")
             else:
-                # Regular paragraph
-                lines.append(f"  <para>{self._escape_xml(para)}</para>")
+                # Regular paragraph - clean up markdown formatting
+                text = para
+                text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<emphasis role="bold-italic">\1</emphasis>', text)
+                text = re.sub(r'\*\*(.+?)\*\*', r'<emphasis role="bold">\1</emphasis>', text)
+                text = re.sub(r'\*(.+?)\*', r'<emphasis>\1</emphasis>', text)
+                text = re.sub(r'<!--.*?-->', '', text)  # Remove comments
+                text = text.strip()
+                if text:
+                    lines.append(f"  <para>{self._escape_xml(text)}</para>")
+
+        if in_section:
+            lines.append("  </sect1>")
 
         lines.extend([
             '</chapter>',
@@ -678,6 +885,9 @@ class HybridConversionRouter:
 
     def _escape_xml(self, text: str) -> str:
         """Escape special XML characters."""
+        # Don't escape if already contains XML tags
+        if "<emphasis" in text or "<para" in text:
+            return text
         return (
             text
             .replace("&", "&amp;")
