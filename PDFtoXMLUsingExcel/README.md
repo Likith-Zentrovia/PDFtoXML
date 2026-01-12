@@ -5,6 +5,7 @@ A production-grade PDF-to-DocBook XML conversion pipeline using Claude Vision AI
 ## Features
 
 - **Claude Vision AI Integration**: Uses Claude Sonnet/Opus for accurate text extraction with zero hallucinations (temperature 0.0)
+- **Hybrid Conversion Mode**: Intelligent page routing - complex pages (with tables/images) go to AI pipeline, simple text-only pages use faster non-AI pipeline
 - **Table Detection**: Automatic table extraction with proper DocBook formatting
 - **Image Extraction**: High-DPI image extraction with proper referencing
 - **DTD Validation**: Automated RittDoc DTD compliance with comprehensive fixing
@@ -41,12 +42,37 @@ export ANTHROPIC_API_KEY="your-api-key-here"
 # Basic conversion
 python pdf_orchestrator.py input.pdf --out ./output
 
+# Hybrid mode (recommended) - routes complex pages to AI, simple pages to fast non-AI
+python pdf_orchestrator.py input.pdf --out ./output --hybrid
+
 # With web editor for manual corrections
 python pdf_orchestrator.py input.pdf --out ./output --edit-mode
 
 # Using Claude Opus for best accuracy
 python pdf_orchestrator.py input.pdf --out ./output --model claude-opus-4-5-20251101
+
+# Hybrid mode with custom complexity thresholds
+python pdf_orchestrator.py input.pdf --out ./output --hybrid --table-threshold 1 --image-threshold 2
 ```
+
+### Hybrid Conversion Mode
+
+The hybrid conversion mode intelligently routes pages between AI and non-AI pipelines based on page complexity:
+
+- **Complex Pages** (with tables or images) → AI Pipeline (Claude Vision)
+- **Simple Pages** (text-only) → Non-AI Pipeline (PyMuPDF text extraction)
+
+This provides:
+- **Faster processing**: Simple text pages don't need expensive AI calls
+- **Cost efficiency**: Only complex pages use the Claude API
+- **Better accuracy**: AI is focused on pages that need it most
+
+The page complexity analyzer detects:
+- Tables (using line intersection and grid pattern analysis)
+- Images (embedded graphics and figures)
+- Multi-column layouts (for informational purposes)
+
+When enabled via API, hybrid mode is the **default** for optimal performance.
 
 ### REST API Usage
 
@@ -137,6 +163,7 @@ PDFtoXMLUsingExcel/
 | `PDFTOXML_BATCH_SIZE` | `10` | Pages per batch |
 | `PDFTOXML_OUTPUT_DIR` | `./output` | Output directory |
 | `PDFTOXML_DTD_PATH` | `RITTDOCdtd/v1.1/RittDocBook.dtd` | DTD file path |
+| `PDFTOXML_USE_HYBRID` | `true` | Enable hybrid mode (route complex pages to AI, simple to non-AI) |
 
 ### Configuration File
 
@@ -170,14 +197,24 @@ Load with: `python -c "from config import load_config; load_config('config.json'
 
 ## Pipeline Steps
 
-1. **Image/Table Extraction** (`Multipage_Image_Extractor.py`)
+1. **Page Complexity Analysis** (`page_complexity_analyzer.py`) - When hybrid mode is enabled
+   - Analyzes each page for tables, images, and complex layouts
+   - Routes pages to appropriate pipeline:
+     - **Complex pages** (tables/images) → AI Pipeline
+     - **Simple pages** (text-only) → Non-AI Pipeline
+
+2. **Image/Table Extraction** (`Multipage_Image_Extractor.py`)
    - Extracts images at high DPI
    - Detects and extracts tables using Camelot
 
-2. **Claude Vision AI Conversion** (`ai_pdf_conversion_service.py`)
-   - Renders each page at 300 DPI
-   - Claude Vision API processes page-by-page
-   - Creates intermediate Markdown, then DocBook XML
+3. **Conversion** (Hybrid or AI-only mode)
+   - **AI Pipeline** (`ai_pdf_conversion_service.py`):
+     - Renders pages at 300 DPI
+     - Claude Vision API processes complex pages
+     - Best for tables, images, multi-column layouts
+   - **Non-AI Pipeline** (`hybrid_conversion_router.py`):
+     - PyMuPDF text extraction for simple pages
+     - Faster and more cost-effective for text-only content
 
 3. **Font Analysis** (inline in `pdf_orchestrator.py`)
    - Extracts font information using PyMuPDF
@@ -216,12 +253,16 @@ The REST API is designed for integration with external UIs:
 ```python
 import requests
 
-# Upload and convert a PDF
+# Upload and convert a PDF (hybrid mode enabled by default)
 with open("document.pdf", "rb") as f:
     response = requests.post(
         "http://localhost:8000/api/v1/convert",
         files={"file": f},
-        data={"model": "claude-sonnet-4-20250514", "dpi": 300}
+        data={
+            "model": "claude-sonnet-4-20250514",
+            "dpi": 300,
+            "use_hybrid": True  # Enable hybrid routing (default)
+        }
     )
 job = response.json()
 job_id = job["job_id"]

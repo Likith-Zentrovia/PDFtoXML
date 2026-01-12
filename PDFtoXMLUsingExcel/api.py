@@ -244,6 +244,7 @@ class ConversionOptions(BaseModel):
     batch_size: int = Field(default=APIConfig.DEFAULT_BATCH_SIZE, ge=1, le=50, description="Pages per batch")
     skip_extraction: bool = Field(default=False, description="Skip image extraction")
     skip_rittdoc: bool = Field(default=False, description="Skip RittDoc packaging in finalize step")
+    use_hybrid: bool = Field(default=True, description="Enable hybrid mode: route complex pages (with tables/images) to AI, simple text-only pages to faster non-AI pipeline")
 
 
 class JobInfo(BaseModel):
@@ -403,6 +404,7 @@ class JobManager:
                         "batch_size": job.options.batch_size,
                         "skip_extraction": job.options.skip_extraction,
                         "skip_rittdoc": job.options.skip_rittdoc,
+                        "use_hybrid": job.options.use_hybrid,
                     }
                 }
                 jobs_data.append(job_data)
@@ -432,6 +434,7 @@ class JobManager:
                     batch_size=job_data["options"]["batch_size"],
                     skip_extraction=job_data["options"].get("skip_extraction", False),
                     skip_rittdoc=job_data["options"].get("skip_rittdoc", False),
+                    use_hybrid=job_data["options"].get("use_hybrid", True),  # Default to True for hybrid mode
                 )
 
                 job = ConversionJob(
@@ -736,6 +739,11 @@ def run_initial_conversion(job: ConversionJob):
             "--batch-size", str(job.options.batch_size),
             "--api-mode",  # Skip editor - we'll run packaging here
         ]
+
+        # Enable hybrid mode: routes complex pages (with tables/images) to AI pipeline,
+        # simple text-only pages to faster non-AI pipeline
+        if job.options.use_hybrid:
+            cmd.append("--hybrid")
 
         if job.options.skip_extraction:
             cmd.append("--skip-extraction")
@@ -1478,6 +1486,7 @@ Use the finalize endpoint only when skipping the editor step.
         batch_size: int = Form(default=APIConfig.DEFAULT_BATCH_SIZE),
         skip_extraction: bool = Form(default=False),
         skip_rittdoc: bool = Form(default=False),
+        use_hybrid: bool = Form(default=True, description="Enable hybrid mode: route complex pages (tables/images) to AI, simple pages to non-AI"),
     ):
         """
         Upload a PDF file and start conversion (Phase 1).
@@ -1537,6 +1546,7 @@ Use the finalize endpoint only when skipping the editor step.
             batch_size=batch_size,
             skip_extraction=skip_extraction,
             skip_rittdoc=skip_rittdoc,
+            use_hybrid=use_hybrid,
         )
 
         # Create job (uses ISBN as job_id)
