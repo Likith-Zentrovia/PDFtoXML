@@ -934,17 +934,14 @@ class HybridConversionRouter:
             result = page_results.get(page_num)
 
             if result is None:
-                lines.append(f"\n<!-- PAGE {page_num} - NO RESULT -->\n")
+                # Skip pages with no result
                 continue
 
             if not result.success:
-                lines.append(f"\n<!-- PAGE {page_num} - ERROR: {result.error} -->\n")
+                # Skip failed pages
                 continue
 
-            # Add pipeline marker
-            lines.append(f"\n<!-- PAGE {page_num} - Pipeline: {result.pipeline.upper()} -->\n")
-
-            # Add content
+            # Add content directly without internal markers
             lines.append(result.content)
 
         return "\n".join(lines)
@@ -977,10 +974,8 @@ class HybridConversionRouter:
             if not para:
                 continue
 
-            # Skip comments but preserve page markers
+            # Skip all internal comments (page markers, pipeline info, etc.)
             if para.startswith("<!--"):
-                if "PAGE" in para:
-                    lines.append(f"  {para}")
                 continue
 
             # Handle headings
