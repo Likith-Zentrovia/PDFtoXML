@@ -888,14 +888,13 @@ class HybridConversionRouter:
         # Don't escape if already contains XML tags
         if "<emphasis" in text or "<para" in text:
             return text
-        return (
-            text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&apos;")
-        )
+        # Escape & first (before other replacements that create &)
+        text = text.replace("&", "&amp;")
+        text = text.replace("<", "&lt;")
+        text = text.replace(">", "&gt;")
+        text = text.replace('"', "&quot;")
+        # Don't escape single quotes in content - causes issues
+        return text
 
     def _save_complexity_report(
         self,
