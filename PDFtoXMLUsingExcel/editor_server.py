@@ -91,10 +91,43 @@ class XMLToHTMLRenderer:
         return tag_str
 
     @staticmethod
+    def _create_lenient_parser():
+        """Create an XML parser that handles undefined entities gracefully."""
+        # Create parser that recovers from errors
+        parser = etree.XMLParser(
+            recover=True,
+            resolve_entities=False,
+            no_network=True
+        )
+        return parser
+
+    @staticmethod
+    def _preprocess_xml_entities(xml_content: str) -> str:
+        """Replace undefined entity references with placeholders."""
+        import re
+        # Find all entity references like &ch0001; and replace with placeholder text
+        # Keep standard XML entities (&amp; &lt; &gt; &quot; &apos;)
+        standard_entities = {'amp', 'lt', 'gt', 'quot', 'apos', 'nbsp'}
+        
+        def replace_entity(match):
+            entity_name = match.group(1)
+            if entity_name in standard_entities or entity_name.startswith('#'):
+                return match.group(0)  # Keep standard entities and numeric refs
+            # Replace unknown entity with its name in brackets
+            return f'[{entity_name}]'
+        
+        return re.sub(r'&([a-zA-Z0-9_]+);', replace_entity, xml_content)
+
+    @staticmethod
     def render(xml_content: str) -> str:
         """Render XML to HTML with proper formatting for tables, images, etc."""
         try:
-            root = etree.fromstring(xml_content.encode('utf-8'))
+            # Preprocess to handle undefined entities
+            xml_content = XMLToHTMLRenderer._preprocess_xml_entities(xml_content)
+            
+            # Use lenient parser
+            parser = XMLToHTMLRenderer._create_lenient_parser()
+            root = etree.fromstring(xml_content.encode('utf-8'), parser=parser)
 
             # Build fontspec lookup from document
             XMLToHTMLRenderer._fontspec_lookup = XMLToHTMLRenderer._build_fontspec_lookup(root)
@@ -917,9 +950,10 @@ def api_save():
             except Exception as e:
                 return jsonify({'error': f'Error converting HTML to XML: {str(e)}'}), 400
 
-        # Validate XML
+        # Validate XML (use lenient parser to allow entity references)
         try:
-            etree.fromstring(content.encode('utf-8'))
+            parser = etree.XMLParser(recover=True, resolve_entities=False)
+            etree.fromstring(content.encode('utf-8'), parser=parser)
         except etree.XMLSyntaxError as e:
             return jsonify({'error': f'Invalid XML: {str(e)}'}), 400
 
@@ -1324,7 +1358,10 @@ def api_page_mapping():
         with open(EDITOR_STATE['xml_path'], 'r', encoding='utf-8') as f:
             xml_content = f.read()
 
-        root = etree.fromstring(xml_content.encode('utf-8'))
+        # Use lenient parser to handle undefined entities
+        xml_content = XMLToHTMLRenderer._preprocess_xml_entities(xml_content)
+        parser = etree.XMLParser(recover=True, resolve_entities=False)
+        root = etree.fromstring(xml_content.encode('utf-8'), parser=parser)
 
         # Build page mapping: page_number -> list of element info
         page_mapping = {}
@@ -1526,8 +1563,9 @@ def reprocess_pipeline():
         # Re-package the XML
         from package import package_docbook, BOOK_DOCTYPE_SYSTEM_DEFAULT, make_file_fetcher
 
-        # Parse the edited XML
-        tree = etree.parse(str(EDITOR_STATE['xml_path']))
+        # Parse the edited XML with lenient parser to handle undefined entities
+        parser = etree.XMLParser(recover=True, resolve_entities=False)
+        tree = etree.parse(str(EDITOR_STATE['xml_path']), parser=parser)
         root = tree.getroot()
 
         # Create media fetcher
