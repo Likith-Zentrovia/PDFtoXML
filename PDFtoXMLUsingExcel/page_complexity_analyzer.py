@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Page Complexity Analyzer for PDF to XML Conversion
+Page Complexity Analyzer for PDF to XML Conversion (v2.0)
 
 This module analyzes each page of a PDF to determine its complexity level.
 Complex pages (with multiple tables, images, or complex layouts) are routed
 to the AI conversion pipeline, while simple pages use the faster non-AI pipeline.
 
-Complexity Indicators:
-- Multiple tables on a single page
-- High image count or large image coverage area
-- Multi-column layouts
-- Mixed content types (text + tables + images)
-- Complex formatting (nested structures, footnotes, etc.)
+Improved Detection Methods:
+- Table detection using line intersection analysis and text grid patterns
+- Proper image extraction using PyMuPDF's get_images()
+- Multi-column detection using text block clustering
+- Drawing/vector graphics analysis
 
 Usage:
     from page_complexity_analyzer import PageComplexityAnalyzer
@@ -34,6 +33,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from collections import defaultdict
 
 # PyMuPDF for PDF analysis
 try:
@@ -42,13 +42,6 @@ try:
 except ImportError:
     HAS_FITZ = False
     print("ERROR: PyMuPDF (fitz) is required. Install with: pip install pymupdf")
-
-# Camelot for advanced table detection (optional)
-try:
-    import camelot
-    HAS_CAMELOT = True
-except ImportError:
-    HAS_CAMELOT = False
 
 
 class ComplexityLevel(Enum):
@@ -65,22 +58,22 @@ class ComplexityThresholds:
     # Table thresholds
     table_count_simple: int = 0       # 0 tables = simple
     table_count_moderate: int = 1     # 1 table = moderate
-    table_count_complex: int = 2      # 2+ tables = complex
+    table_count_complex: int = 1      # 1+ tables = complex (tables need AI)
 
     # Image thresholds
-    image_count_simple: int = 1       # 0-1 images = simple
-    image_count_moderate: int = 3     # 2-3 images = moderate
-    image_count_complex: int = 4      # 4+ images = complex
-    image_area_threshold: float = 0.3 # 30% of page covered by images = complex
+    image_count_simple: int = 0       # 0 images = simple
+    image_count_moderate: int = 1     # 1 image = moderate
+    image_count_complex: int = 2      # 2+ images = complex
+    image_area_threshold: float = 0.25 # 25% of page covered by images = complex
 
     # Layout thresholds
-    column_count_complex: int = 3     # 3+ columns = complex
+    column_count_complex: int = 2     # 2+ columns = complex (multi-column needs AI)
 
     # Text density thresholds
-    min_chars_per_page: int = 100     # Pages with < 100 chars might be mostly images
+    min_chars_per_page: int = 50      # Pages with < 50 chars might be mostly images
 
     # Mixed content scoring
-    mixed_content_score_complex: int = 5  # Combined score threshold for complexity
+    mixed_content_score_complex: int = 3  # Combined score threshold for complexity
 
 
 @dataclass
@@ -93,6 +86,7 @@ class PageComplexity:
     image_count: int = 0
     text_block_count: int = 0
     drawing_count: int = 0  # Vector graphics
+    line_count: int = 0     # Horizontal/vertical lines (table indicators)
 
     # Layout metrics
     column_count: int = 1
@@ -193,14 +187,15 @@ class PageComplexityAnalyzer:
     """
     Analyzes PDF pages to determine complexity and route to appropriate pipeline.
 
-    Uses PyMuPDF (fitz) for fast PDF analysis without external dependencies.
-    Optionally uses Camelot for more accurate table detection.
+    Uses PyMuPDF (fitz) for fast PDF analysis with improved detection methods:
+    - Table detection via line patterns and text grid analysis
+    - Image detection via get_images() API
+    - Multi-column detection via text block clustering
     """
 
     def __init__(
         self,
         thresholds: Optional[ComplexityThresholds] = None,
-        use_camelot: bool = False,
         verbose: bool = True
     ):
         """
@@ -208,14 +203,12 @@ class PageComplexityAnalyzer:
 
         Args:
             thresholds: Custom thresholds for complexity detection
-            use_camelot: Use Camelot for table detection (slower but more accurate)
             verbose: Print progress messages
         """
         if not HAS_FITZ:
             raise ImportError("PyMuPDF (fitz) is required. Install with: pip install pymupdf")
 
         self.thresholds = thresholds or ComplexityThresholds()
-        self.use_camelot = use_camelot and HAS_CAMELOT
         self.verbose = verbose
 
     def analyze_pdf(self, pdf_path: str | Path) -> PDFComplexityReport:
@@ -325,10 +318,10 @@ class PageComplexityAnalyzer:
         page_rect = page.rect
         page_area = page_rect.width * page_rect.height
 
-        # 1. Analyze images
+        # 1. Analyze images (using proper PyMuPDF API)
         self._analyze_images(page, complexity, page_area)
 
-        # 2. Analyze tables (using line detection)
+        # 2. Analyze tables using multiple detection methods
         self._analyze_tables(page, complexity, page_area)
 
         # 3. Analyze text content
@@ -352,151 +345,254 @@ class PageComplexityAnalyzer:
         return complexity
 
     def _analyze_images(self, page: fitz.Page, complexity: PageComplexity, page_area: float) -> None:
-        """Analyze images on the page."""
-        images = page.get_images(full=True)
-        complexity.image_count = len(images)
+        """Analyze images on the page using PyMuPDF's proper image extraction."""
+        # Get all images on the page
+        image_list = page.get_images(full=True)
+        complexity.image_count = len(image_list)
 
         # Calculate image area coverage
         total_image_area = 0.0
-        for img in images:
+        for img in image_list:
             try:
                 xref = img[0]
+                # Get all rectangles where this image appears on the page
                 img_rects = page.get_image_rects(xref)
                 for rect in img_rects:
-                    total_image_area += rect.width * rect.height
+                    if rect and not rect.is_empty:
+                        total_image_area += rect.width * rect.height
             except Exception:
                 pass
 
         if page_area > 0:
-            complexity.image_area_pct = total_image_area / page_area
+            complexity.image_area_pct = min(total_image_area / page_area, 1.0)
 
     def _analyze_tables(self, page: fitz.Page, complexity: PageComplexity, page_area: float) -> None:
         """
-        Analyze tables on the page using line detection.
-
-        Uses PyMuPDF's drawing detection to identify table structures
-        based on horizontal and vertical lines forming grids.
+        Analyze tables on the page using multiple detection methods:
+        1. Line-based detection (horizontal/vertical lines forming grids)
+        2. Text pattern detection (aligned text blocks in grid formation)
         """
-        # Get all paths (lines/drawings) on the page
-        paths = page.get_drawings()
+        # Method 1: Count lines that could form table borders
+        h_lines, v_lines = self._extract_lines(page)
+        complexity.line_count = len(h_lines) + len(v_lines)
 
-        # Separate horizontal and vertical lines
+        # Method 2: Detect table-like structures from line intersections
+        table_regions = self._detect_table_regions_from_lines(h_lines, v_lines, page.rect)
+
+        # Method 3: Detect tables from text alignment patterns
+        text_tables = self._detect_tables_from_text(page)
+
+        # Combine detections (remove duplicates based on overlap)
+        all_tables = self._merge_table_detections(table_regions, text_tables, page.rect)
+        complexity.table_count = len(all_tables)
+
+        # Calculate table area coverage
+        total_table_area = sum(r.width * r.height for r in all_tables if r)
+        if page_area > 0:
+            complexity.table_area_pct = min(total_table_area / page_area, 1.0)
+
+    def _extract_lines(self, page: fitz.Page) -> Tuple[List, List]:
+        """Extract horizontal and vertical lines from page drawings."""
         h_lines = []
         v_lines = []
 
-        for path in paths:
-            for item in path.get("items", []):
-                if item[0] == "l":  # Line
-                    p1, p2 = item[1], item[2]
+        try:
+            paths = page.get_drawings()
 
-                    # Horizontal line (y values approximately equal)
-                    if abs(p1.y - p2.y) < 2:
-                        h_lines.append((min(p1.x, p2.x), max(p1.x, p2.x), p1.y))
-                    # Vertical line (x values approximately equal)
-                    elif abs(p1.x - p2.x) < 2:
-                        v_lines.append((p1.x, min(p1.y, p2.y), max(p1.y, p2.y)))
+            for path in paths:
+                for item in path.get("items", []):
+                    if item[0] == "l":  # Line
+                        p1, p2 = item[1], item[2]
 
-        # Detect table regions by finding grids of lines
-        table_regions = self._detect_table_regions(h_lines, v_lines, page.rect)
-        complexity.table_count = len(table_regions)
+                        # Horizontal line (y values approximately equal)
+                        if abs(p1.y - p2.y) < 3:
+                            length = abs(p2.x - p1.x)
+                            if length > 20:  # Minimum line length
+                                h_lines.append((min(p1.x, p2.x), max(p1.x, p2.x), (p1.y + p2.y) / 2))
 
-        # Calculate table area coverage
-        total_table_area = sum(r.width * r.height for r in table_regions)
-        if page_area > 0:
-            complexity.table_area_pct = total_table_area / page_area
+                        # Vertical line (x values approximately equal)
+                        elif abs(p1.x - p2.x) < 3:
+                            length = abs(p2.y - p1.y)
+                            if length > 20:  # Minimum line length
+                                v_lines.append(((p1.x + p2.x) / 2, min(p1.y, p2.y), max(p1.y, p2.y)))
 
-    def _detect_table_regions(
+                    elif item[0] == "re":  # Rectangle (4 lines)
+                        rect = item[1]
+                        if rect.width > 20 and rect.height > 10:
+                            # Add rectangle edges as lines
+                            h_lines.append((rect.x0, rect.x1, rect.y0))
+                            h_lines.append((rect.x0, rect.x1, rect.y1))
+                            v_lines.append((rect.x0, rect.y0, rect.y1))
+                            v_lines.append((rect.x1, rect.y0, rect.y1))
+        except Exception:
+            pass
+
+        return h_lines, v_lines
+
+    def _detect_table_regions_from_lines(
         self,
         h_lines: List[Tuple[float, float, float]],
         v_lines: List[Tuple[float, float, float]],
         page_rect: fitz.Rect
     ) -> List[fitz.Rect]:
-        """
-        Detect table regions from horizontal and vertical lines.
-
-        A table is detected when we find a grid pattern of intersecting lines.
-        """
+        """Detect table regions from line patterns."""
         if len(h_lines) < 2 or len(v_lines) < 2:
             return []
 
-        # Group lines by approximate position
-        def cluster_lines(lines: List, pos_idx: int, tolerance: float = 5.0) -> List[List]:
-            """Cluster lines by position."""
-            if not lines:
-                return []
-
-            sorted_lines = sorted(lines, key=lambda x: x[pos_idx])
-            clusters = []
-            current_cluster = [sorted_lines[0]]
-
-            for line in sorted_lines[1:]:
-                if line[pos_idx] - current_cluster[-1][pos_idx] < tolerance:
-                    current_cluster.append(line)
-                else:
-                    if len(current_cluster) >= 2:  # At least 2 lines in same row/col
-                        clusters.append(current_cluster)
-                    current_cluster = [line]
-
-            if len(current_cluster) >= 2:
-                clusters.append(current_cluster)
-
-            return clusters
-
-        # Find horizontal line clusters (table rows)
-        h_clusters = cluster_lines(h_lines, 2)  # Group by y position
-
-        # Find vertical line clusters (table columns)
-        v_clusters = cluster_lines(v_lines, 0)  # Group by x position
-
-        # A table requires at least 2 horizontal rows and 2 vertical columns
-        if len(h_clusters) < 2 or len(v_clusters) < 2:
-            return []
-
-        # Find table bounding boxes
         tables = []
 
-        # Simple heuristic: find rectangular regions bounded by lines
-        for h_cluster in h_clusters:
-            if len(h_cluster) < 2:
-                continue
+        # Cluster horizontal lines by y-position
+        h_clusters = self._cluster_lines_by_position(h_lines, pos_idx=2, tolerance=10)
 
-            # Get y bounds
-            y_min = min(l[2] for l in h_cluster)
-            y_max = max(l[2] for l in h_cluster)
+        # Cluster vertical lines by x-position
+        v_clusters = self._cluster_lines_by_position(v_lines, pos_idx=0, tolerance=10)
 
-            if y_max - y_min < 20:  # Too small
-                continue
+        # A table needs at least 2 horizontal rows and 2 vertical columns of lines
+        if len(h_clusters) >= 2 and len(v_clusters) >= 2:
+            # Find bounding box of the line grid
+            all_h_y = [l[2] for l in h_lines]
+            all_v_x = [l[0] for l in v_lines]
+            all_h_x = [x for l in h_lines for x in (l[0], l[1])]
+            all_v_y = [y for l in v_lines for y in (l[1], l[2])]
 
-            # Find vertical lines within this y range
-            relevant_v_lines = [
-                v for v in v_lines
-                if v[1] <= y_max and v[2] >= y_min
-            ]
+            if all_h_y and all_v_x:
+                y_min, y_max = min(all_h_y), max(all_h_y)
+                x_min, x_max = min(all_v_x), max(all_v_x)
 
-            if len(relevant_v_lines) < 2:
-                continue
+                # Also consider line extents
+                if all_h_x:
+                    x_min = min(x_min, min(all_h_x))
+                    x_max = max(x_max, max(all_h_x))
+                if all_v_y:
+                    y_min = min(y_min, min(all_v_y))
+                    y_max = max(y_max, max(all_v_y))
 
-            x_min = min(v[0] for v in relevant_v_lines)
-            x_max = max(v[0] for v in relevant_v_lines)
+                # Check if this is a reasonable table size
+                width = x_max - x_min
+                height = y_max - y_min
 
-            if x_max - x_min < 50:  # Too narrow
-                continue
-
-            table_rect = fitz.Rect(x_min, y_min, x_max, y_max)
-
-            # Check if this table overlaps with existing ones
-            is_new = True
-            for existing in tables:
-                if table_rect.intersects(existing):
-                    # Merge overlapping tables
-                    existing.include_rect(table_rect)
-                    is_new = False
-                    break
-
-            if is_new:
-                tables.append(table_rect)
+                if width > 50 and height > 30:
+                    table_rect = fitz.Rect(x_min, y_min, x_max, y_max)
+                    tables.append(table_rect)
 
         return tables
+
+    def _cluster_lines_by_position(
+        self,
+        lines: List[Tuple],
+        pos_idx: int,
+        tolerance: float
+    ) -> List[List]:
+        """Cluster lines by their position (y for horizontal, x for vertical)."""
+        if not lines:
+            return []
+
+        sorted_lines = sorted(lines, key=lambda x: x[pos_idx])
+        clusters = []
+        current_cluster = [sorted_lines[0]]
+
+        for line in sorted_lines[1:]:
+            if abs(line[pos_idx] - current_cluster[-1][pos_idx]) <= tolerance:
+                current_cluster.append(line)
+            else:
+                if len(current_cluster) >= 1:
+                    clusters.append(current_cluster)
+                current_cluster = [line]
+
+        if len(current_cluster) >= 1:
+            clusters.append(current_cluster)
+
+        return clusters
+
+    def _detect_tables_from_text(self, page: fitz.Page) -> List[fitz.Rect]:
+        """Detect tables by analyzing text alignment patterns."""
+        tables = []
+
+        try:
+            # Get text blocks
+            blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE).get("blocks", [])
+            text_blocks = [b for b in blocks if b.get("type") == 0]
+
+            if len(text_blocks) < 4:
+                return tables
+
+            # Group blocks by their left x-position (potential columns)
+            x_positions = defaultdict(list)
+            for block in text_blocks:
+                bbox = block.get("bbox", (0, 0, 0, 0))
+                x_pos = round(bbox[0] / 10) * 10  # Round to nearest 10
+                x_positions[x_pos].append(block)
+
+            # If we have multiple columns with multiple items each, might be a table
+            columns_with_multiple = [x for x, blocks in x_positions.items() if len(blocks) >= 2]
+
+            if len(columns_with_multiple) >= 2:
+                # Check if items are aligned horizontally (same y positions)
+                all_blocks_in_columns = []
+                for x in columns_with_multiple:
+                    all_blocks_in_columns.extend(x_positions[x])
+
+                y_positions = defaultdict(int)
+                for block in all_blocks_in_columns:
+                    bbox = block.get("bbox", (0, 0, 0, 0))
+                    y_pos = round(bbox[1] / 10) * 10
+                    y_positions[y_pos] += 1
+
+                # If multiple y-positions have multiple blocks, looks like a table
+                rows_with_multiple = [y for y, count in y_positions.items() if count >= 2]
+
+                if len(rows_with_multiple) >= 2 and len(columns_with_multiple) >= 2:
+                    # Calculate bounding box
+                    all_bboxes = [b.get("bbox", (0, 0, 0, 0)) for b in all_blocks_in_columns]
+                    x0 = min(b[0] for b in all_bboxes)
+                    y0 = min(b[1] for b in all_bboxes)
+                    x1 = max(b[2] for b in all_bboxes)
+                    y1 = max(b[3] for b in all_bboxes)
+
+                    if x1 - x0 > 100 and y1 - y0 > 50:
+                        tables.append(fitz.Rect(x0, y0, x1, y1))
+
+        except Exception:
+            pass
+
+        return tables
+
+    def _merge_table_detections(
+        self,
+        line_tables: List[fitz.Rect],
+        text_tables: List[fitz.Rect],
+        page_rect: fitz.Rect
+    ) -> List[fitz.Rect]:
+        """Merge table detections from different methods, removing duplicates."""
+        all_tables = line_tables + text_tables
+
+        if not all_tables:
+            return []
+
+        # Remove duplicates based on significant overlap (>50%)
+        merged = []
+        for table in all_tables:
+            is_duplicate = False
+            for existing in merged:
+                intersection = table & existing  # Intersection
+                if intersection and not intersection.is_empty:
+                    # Calculate overlap percentage
+                    intersection_area = intersection.width * intersection.height
+                    table_area = table.width * table.height
+                    existing_area = existing.width * existing.height
+
+                    if table_area > 0 and existing_area > 0:
+                        overlap_pct = intersection_area / min(table_area, existing_area)
+                        if overlap_pct > 0.5:
+                            # Merge into existing (expand to cover both)
+                            existing.include_rect(table)
+                            is_duplicate = True
+                            break
+
+            if not is_duplicate:
+                merged.append(table)
+
+        return merged
 
     def _analyze_text(self, page: fitz.Page, complexity: PageComplexity, page_area: float) -> None:
         """Analyze text content on the page."""
@@ -529,7 +625,6 @@ class PageComplexityAnalyzer:
         for block in text_blocks:
             bbox = block.get("bbox", (0, 0, 0, 0))
             if bbox[1] > page_height * 0.85:  # Bottom 15% of page
-                # Check for footnote indicators
                 for line in block.get("lines", []):
                     for span in line.get("spans", []):
                         text = span.get("text", "").strip()
@@ -538,7 +633,7 @@ class PageComplexityAnalyzer:
                             complexity.has_footnotes = True
                             break
 
-        # Check for headers/footers (repeated text patterns at top/bottom)
+        # Check for headers/footers
         for block in text_blocks:
             bbox = block.get("bbox", (0, 0, 0, 0))
             if bbox[1] < page_height * 0.08 or bbox[3] > page_height * 0.92:
@@ -547,21 +642,24 @@ class PageComplexityAnalyzer:
 
     def _analyze_drawings(self, page: fitz.Page, complexity: PageComplexity) -> None:
         """Analyze vector drawings on the page."""
-        drawings = page.get_drawings()
+        try:
+            drawings = page.get_drawings()
 
-        # Count non-table drawings (excluding simple lines for tables)
-        drawing_count = 0
-        for path in drawings:
-            items = path.get("items", [])
-            # Complex drawing if it has curves, fills, or many segments
-            has_curve = any(item[0] in ("c", "qu") for item in items)
-            has_fill = path.get("fill") is not None
-            many_segments = len(items) > 4
+            # Count complex drawings (not simple lines)
+            drawing_count = 0
+            for path in drawings:
+                items = path.get("items", [])
+                # Complex drawing if it has curves, fills, or many segments
+                has_curve = any(item[0] in ("c", "qu") for item in items)
+                has_fill = path.get("fill") is not None
+                many_segments = len(items) > 4
 
-            if has_curve or has_fill or many_segments:
-                drawing_count += 1
+                if has_curve or has_fill or many_segments:
+                    drawing_count += 1
 
-        complexity.drawing_count = drawing_count
+            complexity.drawing_count = drawing_count
+        except Exception:
+            pass
 
     def _analyze_layout(self, page: fitz.Page, complexity: PageComplexity) -> None:
         """Analyze page layout for multi-column detection."""
@@ -573,28 +671,26 @@ class PageComplexityAnalyzer:
             complexity.column_count = 1
             return
 
-        # Get x-positions of text blocks
+        # Get x-positions of text block left edges
         x_positions = []
         for block in text_blocks:
             bbox = block.get("bbox", (0, 0, 0, 0))
-            x_positions.append(bbox[0])  # Left edge
+            x_positions.append(bbox[0])
 
-        # Cluster x-positions to detect columns
         if not x_positions:
             complexity.column_count = 1
             return
 
-        x_positions.sort()
+        # Cluster x-positions to detect columns
         page_width = page.rect.width
+        tolerance = page_width * 0.08  # 8% of page width
 
-        # Use a tolerance based on page width
-        tolerance = page_width * 0.1  # 10% of page width
-
+        x_positions.sort()
         columns = []
         current_col = [x_positions[0]]
 
         for x in x_positions[1:]:
-            if x - current_col[-1] < tolerance:
+            if x - current_col[0] < tolerance:
                 current_col.append(x)
             else:
                 columns.append(current_col)
@@ -602,7 +698,10 @@ class PageComplexityAnalyzer:
 
         columns.append(current_col)
 
-        complexity.column_count = len(columns)
+        # Filter out columns with too few blocks
+        significant_columns = [c for c in columns if len(c) >= 2]
+
+        complexity.column_count = max(1, len(significant_columns))
         complexity.has_multi_column = complexity.column_count > 1
 
     def _calculate_complexity(self, complexity: PageComplexity) -> None:
@@ -610,54 +709,54 @@ class PageComplexityAnalyzer:
         score = 0
         t = self.thresholds
 
-        # Table scoring (highest weight)
+        # Table scoring (highest weight - tables always need AI)
         if complexity.table_count >= t.table_count_complex:
-            score += 4
-            complexity.add_reason(f"{complexity.table_count} tables detected")
+            score += 5
+            complexity.add_reason(f"{complexity.table_count} table(s) detected")
         elif complexity.table_count >= t.table_count_moderate:
-            score += 2
+            score += 3
             complexity.add_reason(f"{complexity.table_count} table detected")
 
         # Image scoring
         if complexity.image_count >= t.image_count_complex:
             score += 3
-            complexity.add_reason(f"{complexity.image_count} images detected")
+            complexity.add_reason(f"{complexity.image_count} images")
         elif complexity.image_count >= t.image_count_moderate:
             score += 1
 
         # Image area coverage
         if complexity.image_area_pct >= t.image_area_threshold:
-            score += 2
+            score += 3
             complexity.add_reason(f"{complexity.image_area_pct*100:.0f}% image coverage")
 
-        # Multi-column layout
+        # Multi-column layout (needs AI for proper reading order)
         if complexity.column_count >= t.column_count_complex:
-            score += 2
+            score += 3
             complexity.add_reason(f"{complexity.column_count}-column layout")
         elif complexity.has_multi_column:
-            score += 1
+            score += 2
+            complexity.add_reason("multi-column layout")
 
         # Complex drawings (diagrams, charts)
-        if complexity.drawing_count > 3:
+        if complexity.drawing_count > 10:
             score += 2
-            complexity.add_reason(f"{complexity.drawing_count} complex drawings")
-        elif complexity.drawing_count > 0:
+            complexity.add_reason(f"{complexity.drawing_count} drawings")
+        elif complexity.drawing_count > 3:
             score += 1
 
-        # Footnotes add some complexity
+        # Footnotes
         if complexity.has_footnotes:
             score += 1
             complexity.add_reason("has footnotes")
 
-        # Rotated content is complex
-        if complexity.has_rotated_content:
-            score += 2
-            complexity.add_reason("rotated content")
-
         # Low text density might indicate mostly images
         if complexity.char_count < t.min_chars_per_page and complexity.image_count > 0:
-            score += 1
+            score += 2
             complexity.add_reason("low text density")
+
+        # Line count (table borders)
+        if complexity.line_count > 20:
+            score += 1
 
         # Store complexity score
         complexity.complexity_score = score
@@ -673,11 +772,20 @@ class PageComplexityAnalyzer:
             complexity.complexity_level = ComplexityLevel.SIMPLE
 
         # Routing decision: Complex and Highly Complex -> AI pipeline
+        # Also route pages with tables or multi-column to AI
         complexity.is_complex = complexity.complexity_level in (
             ComplexityLevel.COMPLEX,
             ComplexityLevel.HIGHLY_COMPLEX
         )
-        complexity.route_to_ai = complexity.is_complex
+
+        # Force AI for tables and multi-column regardless of overall score
+        force_ai = (
+            complexity.table_count > 0 or
+            complexity.column_count >= 2 or
+            complexity.image_area_pct >= t.image_area_threshold
+        )
+
+        complexity.route_to_ai = complexity.is_complex or force_ai
 
         # Simple pages with no reason
         if not complexity.complexity_reasons:
@@ -718,14 +826,14 @@ def main():
     parser.add_argument(
         "--table-threshold",
         type=int,
-        default=2,
-        help="Number of tables to consider page complex (default: 2)"
+        default=1,
+        help="Number of tables to consider page complex (default: 1)"
     )
     parser.add_argument(
         "--image-threshold",
         type=int,
-        default=4,
-        help="Number of images to consider page complex (default: 4)"
+        default=2,
+        help="Number of images to consider page complex (default: 2)"
     )
 
     args = parser.parse_args()
