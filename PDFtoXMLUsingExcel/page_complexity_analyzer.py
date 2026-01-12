@@ -368,31 +368,99 @@ class PageComplexityAnalyzer:
 
     def _analyze_tables(self, page: fitz.Page, complexity: PageComplexity, page_area: float) -> None:
         """
-        Analyze tables on the page - STRICT detection.
+        Analyze tables on the page - VERY STRICT detection.
 
-        Only detects ACTUAL tables with visible grid lines/borders.
+        Only detects ACTUAL tables with visible grid lines/borders forming cells.
         Multi-column text layouts are NOT tables.
+        Column separators and simple ruled lines are NOT tables.
         """
         # Method 1: Count lines that could form table borders
         h_lines, v_lines = self._extract_lines(page)
         complexity.line_count = len(h_lines) + len(v_lines)
 
-        # STRICT TABLE DETECTION: Only detect tables with clear grid patterns
-        # Requires BOTH horizontal AND vertical lines forming a grid
-        table_regions = self._detect_table_regions_from_lines(h_lines, v_lines, page.rect)
-
-        # Only count as table if we have a proper grid (not just aligned text)
-        # A real table needs at least 3 horizontal lines and 2 vertical lines
-        if len(h_lines) >= 3 and len(v_lines) >= 2:
-            complexity.table_count = len(table_regions)
-        else:
+        # VERY STRICT TABLE DETECTION:
+        # A real table needs:
+        # 1. Multiple horizontal lines (at least 4 - top border, header separator, row separators, bottom)
+        # 2. Multiple vertical lines (at least 3 - left border, column separators, right border)
+        # 3. Lines must form a proper grid pattern (intersections)
+        
+        min_h_lines_for_table = 4  # Header + at least 2 data rows + borders
+        min_v_lines_for_table = 3  # At least 2 columns with borders
+        
+        if len(h_lines) < min_h_lines_for_table or len(v_lines) < min_v_lines_for_table:
             complexity.table_count = 0
+            return
+        
+        # Check if lines form a grid pattern (not just parallel lines)
+        table_regions = self._detect_table_regions_from_lines(h_lines, v_lines, page.rect)
+        
+        # Additional validation: verify the detected region has proper grid structure
+        validated_tables = []
+        for region in table_regions:
+            if self._validate_table_grid(h_lines, v_lines, region):
+                validated_tables.append(region)
+        
+        complexity.table_count = len(validated_tables)
 
         # Calculate table area coverage
         if complexity.table_count > 0:
-            total_table_area = sum(r.width * r.height for r in table_regions if r)
+            total_table_area = sum(r.width * r.height for r in validated_tables if r)
             if page_area > 0:
                 complexity.table_area_pct = min(total_table_area / page_area, 1.0)
+    
+    def _validate_table_grid(
+        self,
+        h_lines: List[Tuple[float, float, float]],
+        v_lines: List[Tuple[float, float, float]],
+        region: "fitz.Rect"
+    ) -> bool:
+        """
+        Validate that lines within a region form an actual table grid.
+        
+        Returns True only if there are proper intersections forming cells.
+        """
+        # Get lines within the region (with some tolerance)
+        tolerance = 10
+        
+        # Filter horizontal lines in region
+        h_in_region = [
+            h for h in h_lines 
+            if (region.y0 - tolerance <= h[2] <= region.y1 + tolerance and
+                h[0] < region.x1 and h[1] > region.x0)
+        ]
+        
+        # Filter vertical lines in region
+        v_in_region = [
+            v for v in v_lines
+            if (region.x0 - tolerance <= v[0] <= region.x1 + tolerance and
+                v[1] < region.y1 and v[2] > region.y0)
+        ]
+        
+        # Need at least 4 horizontal and 3 vertical lines for a real table
+        if len(h_in_region) < 4 or len(v_in_region) < 3:
+            return False
+        
+        # Check for actual intersections (grid pattern)
+        # Count how many vertical lines intersect with horizontal lines
+        intersection_count = 0
+        for h in h_in_region:
+            h_y = h[2]
+            h_x_start, h_x_end = h[0], h[1]
+            
+            for v in v_in_region:
+                v_x = v[0]
+                v_y_start, v_y_end = v[1], v[2]
+                
+                # Check if lines intersect
+                if (h_x_start - tolerance <= v_x <= h_x_end + tolerance and
+                    v_y_start - tolerance <= h_y <= v_y_end + tolerance):
+                    intersection_count += 1
+        
+        # A real table grid should have many intersections
+        # Minimum: (h_lines - 1) * (v_lines - 1) / 2 intersections
+        min_intersections = max(6, (len(h_in_region) - 1) * (len(v_in_region) - 1) // 3)
+        
+        return intersection_count >= min_intersections
 
     def _extract_lines(self, page: fitz.Page) -> Tuple[List, List]:
         """Extract horizontal and vertical lines from page drawings."""
