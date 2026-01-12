@@ -705,87 +705,55 @@ class PageComplexityAnalyzer:
         complexity.has_multi_column = complexity.column_count > 1
 
     def _calculate_complexity(self, complexity: PageComplexity) -> None:
-        """Calculate overall complexity score and determine routing."""
+        """
+        Calculate overall complexity score and determine routing.
+
+        ROUTING LOGIC (Simplified):
+        - Pages with TABLES -> AI (tables need AI for proper extraction)
+        - Pages with IMAGES -> AI (images need AI for proper handling)
+        - Plain text pages -> Non-AI (fast text extraction)
+        """
         score = 0
         t = self.thresholds
 
-        # Table scoring (highest weight - tables always need AI)
-        if complexity.table_count >= t.table_count_complex:
+        # Only tables and images determine AI routing
+        has_tables = complexity.table_count > 0
+        has_images = complexity.image_count > 0
+
+        # Table scoring
+        if has_tables:
             score += 5
-            complexity.add_reason(f"{complexity.table_count} table(s) detected")
-        elif complexity.table_count >= t.table_count_moderate:
-            score += 3
-            complexity.add_reason(f"{complexity.table_count} table detected")
+            complexity.add_reason(f"{complexity.table_count} table(s)")
 
-        # Image scoring
-        if complexity.image_count >= t.image_count_complex:
-            score += 3
-            complexity.add_reason(f"{complexity.image_count} images")
-        elif complexity.image_count >= t.image_count_moderate:
-            score += 1
+        # Image scoring - only actual embedded images, not drawings
+        if has_images:
+            score += 4
+            complexity.add_reason(f"{complexity.image_count} image(s)")
 
-        # Image area coverage
-        if complexity.image_area_pct >= t.image_area_threshold:
-            score += 3
-            complexity.add_reason(f"{complexity.image_area_pct*100:.0f}% image coverage")
-
-        # Multi-column layout (needs AI for proper reading order)
-        if complexity.column_count >= t.column_count_complex:
-            score += 3
+        # Additional info for reporting (doesn't affect routing)
+        if complexity.has_multi_column:
             complexity.add_reason(f"{complexity.column_count}-column layout")
-        elif complexity.has_multi_column:
-            score += 2
-            complexity.add_reason("multi-column layout")
 
-        # Complex drawings (diagrams, charts)
-        if complexity.drawing_count > 10:
-            score += 2
-            complexity.add_reason(f"{complexity.drawing_count} drawings")
-        elif complexity.drawing_count > 3:
-            score += 1
-
-        # Footnotes
         if complexity.has_footnotes:
-            score += 1
             complexity.add_reason("has footnotes")
-
-        # Low text density might indicate mostly images
-        if complexity.char_count < t.min_chars_per_page and complexity.image_count > 0:
-            score += 2
-            complexity.add_reason("low text density")
-
-        # Line count (table borders)
-        if complexity.line_count > 20:
-            score += 1
 
         # Store complexity score
         complexity.complexity_score = score
 
-        # Determine complexity level
-        if score >= 6:
+        # Determine complexity level based on tables/images only
+        if has_tables and has_images:
             complexity.complexity_level = ComplexityLevel.HIGHLY_COMPLEX
-        elif score >= t.mixed_content_score_complex:
+        elif has_tables or has_images:
             complexity.complexity_level = ComplexityLevel.COMPLEX
-        elif score >= 2:
+        elif complexity.has_multi_column or complexity.drawing_count > 5:
             complexity.complexity_level = ComplexityLevel.MODERATE
         else:
             complexity.complexity_level = ComplexityLevel.SIMPLE
 
-        # Routing decision: Complex and Highly Complex -> AI pipeline
-        # Also route pages with tables or multi-column to AI
-        complexity.is_complex = complexity.complexity_level in (
-            ComplexityLevel.COMPLEX,
-            ComplexityLevel.HIGHLY_COMPLEX
-        )
-
-        # Force AI for tables and multi-column regardless of overall score
-        force_ai = (
-            complexity.table_count > 0 or
-            complexity.column_count >= 2 or
-            complexity.image_area_pct >= t.image_area_threshold
-        )
-
-        complexity.route_to_ai = complexity.is_complex or force_ai
+        # ROUTING DECISION: Only route to AI if page has tables OR images
+        # Plain text pages (even with multi-column, footnotes, etc.) go to non-AI
+        complexity.route_to_ai = has_tables or has_images
+        complexity.is_complex = complexity.route_to_ai
 
         # Simple pages with no reason
         if not complexity.complexity_reasons:
