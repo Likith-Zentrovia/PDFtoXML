@@ -851,7 +851,8 @@ class HybridConversionRouter:
                 if items:
                     lines.append("  <itemizedlist>")
                     for item in items:
-                        lines.append(f"    <listitem><para>{self._escape_xml(item)}</para></listitem>")
+                        escaped_item = self._escape_xml_content(item)
+                        lines.append(f"    <listitem><para>{escaped_item}</para></listitem>")
                     lines.append("  </itemizedlist>")
             elif re.match(r'^\d+\.\s', para):
                 # Convert numbered list
@@ -859,18 +860,22 @@ class HybridConversionRouter:
                 if items:
                     lines.append("  <orderedlist>")
                     for item in items:
-                        lines.append(f"    <listitem><para>{self._escape_xml(item)}</para></listitem>")
+                        escaped_item = self._escape_xml_content(item)
+                        lines.append(f"    <listitem><para>{escaped_item}</para></listitem>")
                     lines.append("  </orderedlist>")
             else:
                 # Regular paragraph - clean up markdown formatting
                 text = para
-                text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<emphasis role="bold-italic">\1</emphasis>', text)
-                text = re.sub(r'\*\*(.+?)\*\*', r'<emphasis role="bold">\1</emphasis>', text)
-                text = re.sub(r'\*(.+?)\*', r'<emphasis>\1</emphasis>', text)
-                text = re.sub(r'<!--.*?-->', '', text)  # Remove comments
+                text = re.sub(r'<!--.*?-->', '', text)  # Remove comments first
                 text = text.strip()
                 if text:
-                    lines.append(f"  <para>{self._escape_xml(text)}</para>")
+                    # Escape XML special characters BEFORE adding emphasis tags
+                    text = self._escape_xml_content(text)
+                    # Now convert markdown to XML emphasis tags
+                    text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<emphasis role="bold-italic">\1</emphasis>', text)
+                    text = re.sub(r'\*\*(.+?)\*\*', r'<emphasis role="bold">\1</emphasis>', text)
+                    text = re.sub(r'\*(.+?)\*', r'<emphasis>\1</emphasis>', text)
+                    lines.append(f"  <para>{text}</para>")
 
         if in_section:
             lines.append("  </sect1>")
@@ -884,16 +889,41 @@ class HybridConversionRouter:
             f.write("\n".join(lines))
 
     def _escape_xml(self, text: str) -> str:
-        """Escape special XML characters."""
-        # Don't escape if already contains XML tags
+        """Escape special XML characters for use in XML attributes and simple content."""
+        # Don't escape if already contains XML tags (for backwards compatibility)
         if "<emphasis" in text or "<para" in text:
             return text
+        return self._escape_xml_content(text)
+    
+    def _escape_xml_content(self, text: str) -> str:
+        """
+        Escape special XML characters in text content.
+        
+        Always escapes, regardless of existing XML tags.
+        Use this for text that will have XML tags added AFTER escaping.
+        """
         # Escape & first (before other replacements that create &)
+        # But don't double-escape already escaped entities
+        # First, temporarily replace already-escaped entities
+        text = re.sub(r'&amp;', '\x00AMP\x00', text)
+        text = re.sub(r'&lt;', '\x00LT\x00', text)
+        text = re.sub(r'&gt;', '\x00GT\x00', text)
+        text = re.sub(r'&quot;', '\x00QUOT\x00', text)
+        text = re.sub(r'&apos;', '\x00APOS\x00', text)
+        
+        # Now escape remaining special characters
         text = text.replace("&", "&amp;")
         text = text.replace("<", "&lt;")
         text = text.replace(">", "&gt;")
         text = text.replace('"', "&quot;")
-        # Don't escape single quotes in content - causes issues
+        
+        # Restore already-escaped entities
+        text = text.replace('\x00AMP\x00', '&amp;')
+        text = text.replace('\x00LT\x00', '&lt;')
+        text = text.replace('\x00GT\x00', '&gt;')
+        text = text.replace('\x00QUOT\x00', '&quot;')
+        text = text.replace('\x00APOS\x00', '&apos;')
+        
         return text
 
     def _save_complexity_report(
