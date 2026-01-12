@@ -345,122 +345,172 @@ class PageComplexityAnalyzer:
         return complexity
 
     def _analyze_images(self, page: fitz.Page, complexity: PageComplexity, page_area: float) -> None:
-        """Analyze images on the page using PyMuPDF's proper image extraction."""
+        """
+        Analyze images on the page using PyMuPDF's proper image extraction.
+        
+        Only counts significant images (not tiny icons or decorative elements).
+        Minimum image size: 50x50 pixels or 1% of page area.
+        """
         # Get all images on the page
         image_list = page.get_images(full=True)
-        complexity.image_count = len(image_list)
-
-        # Calculate image area coverage
+        
+        # Minimum thresholds for "real" images
+        min_dimension = 50  # pixels
+        min_area_pct = 0.01  # 1% of page area
+        min_area = page_area * min_area_pct if page_area > 0 else 2500
+        
+        # Count only significant images
+        significant_image_count = 0
         total_image_area = 0.0
+        
         for img in image_list:
             try:
                 xref = img[0]
+                # Get image dimensions from the xref
+                img_width = img[2] if len(img) > 2 else 0
+                img_height = img[3] if len(img) > 3 else 0
+                
                 # Get all rectangles where this image appears on the page
                 img_rects = page.get_image_rects(xref)
                 for rect in img_rects:
                     if rect and not rect.is_empty:
-                        total_image_area += rect.width * rect.height
+                        rect_area = rect.width * rect.height
+                        total_image_area += rect_area
+                        
+                        # Only count as significant if large enough
+                        if (rect.width >= min_dimension and rect.height >= min_dimension) or \
+                           rect_area >= min_area:
+                            significant_image_count += 1
             except Exception:
                 pass
+        
+        complexity.image_count = significant_image_count
 
         if page_area > 0:
             complexity.image_area_pct = min(total_image_area / page_area, 1.0)
 
     def _analyze_tables(self, page: fitz.Page, complexity: PageComplexity, page_area: float) -> None:
         """
-        Analyze tables on the page - VERY STRICT detection.
+        Analyze tables on the page - EXTREMELY STRICT detection.
 
-        Only detects ACTUAL tables with visible grid lines/borders forming cells.
-        Multi-column text layouts are NOT tables.
-        Column separators and simple ruled lines are NOT tables.
+        Only detects ACTUAL tables with clear bordered cells.
+        This method is intentionally very conservative to avoid false positives.
+        
+        A table MUST have:
+        - Clear rectangular cell structure with borders
+        - Multiple rows AND multiple columns
+        - Consistent grid pattern (lines forming actual cells)
         """
-        # Method 1: Count lines that could form table borders
+        # Extract lines from the page
         h_lines, v_lines = self._extract_lines(page)
         complexity.line_count = len(h_lines) + len(v_lines)
-
-        # VERY STRICT TABLE DETECTION:
-        # A real table needs:
-        # 1. Multiple horizontal lines (at least 4 - top border, header separator, row separators, bottom)
-        # 2. Multiple vertical lines (at least 3 - left border, column separators, right border)
-        # 3. Lines must form a proper grid pattern (intersections)
         
-        min_h_lines_for_table = 4  # Header + at least 2 data rows + borders
-        min_v_lines_for_table = 3  # At least 2 columns with borders
+        # EXTREMELY STRICT: Need substantial evidence of a table
+        # At minimum: 5 horizontal lines (4 rows) and 4 vertical lines (3 columns)
+        min_h_lines = 5
+        min_v_lines = 4
         
-        if len(h_lines) < min_h_lines_for_table or len(v_lines) < min_v_lines_for_table:
+        if len(h_lines) < min_h_lines or len(v_lines) < min_v_lines:
             complexity.table_count = 0
             return
         
-        # Check if lines form a grid pattern (not just parallel lines)
-        table_regions = self._detect_table_regions_from_lines(h_lines, v_lines, page.rect)
+        # Find potential table regions by looking for dense line clusters
+        table_count = 0
+        table_area = 0.0
         
-        # Additional validation: verify the detected region has proper grid structure
-        validated_tables = []
-        for region in table_regions:
-            if self._validate_table_grid(h_lines, v_lines, region):
-                validated_tables.append(region)
+        # Check if lines form actual rectangular cells
+        if self._has_real_table_grid(h_lines, v_lines, page.rect):
+            table_count = 1
+            # Estimate table area from line bounds
+            if h_lines and v_lines:
+                h_ys = [h[2] for h in h_lines]
+                v_xs = [v[0] for v in v_lines]
+                table_width = max(v_xs) - min(v_xs)
+                table_height = max(h_ys) - min(h_ys)
+                table_area = table_width * table_height
         
-        complexity.table_count = len(validated_tables)
-
-        # Calculate table area coverage
-        if complexity.table_count > 0:
-            total_table_area = sum(r.width * r.height for r in validated_tables if r)
-            if page_area > 0:
-                complexity.table_area_pct = min(total_table_area / page_area, 1.0)
+        complexity.table_count = table_count
+        if table_count > 0 and page_area > 0:
+            complexity.table_area_pct = min(table_area / page_area, 1.0)
     
-    def _validate_table_grid(
+    def _has_real_table_grid(
         self,
         h_lines: List[Tuple[float, float, float]],
         v_lines: List[Tuple[float, float, float]],
-        region: "fitz.Rect"
+        page_rect: "fitz.Rect"
     ) -> bool:
         """
-        Validate that lines within a region form an actual table grid.
+        Check if lines form a real table grid with cells.
         
-        Returns True only if there are proper intersections forming cells.
+        Requirements for a real table:
+        1. Horizontal lines must span across multiple vertical lines
+        2. Vertical lines must span across multiple horizontal lines  
+        3. Lines must form closed rectangular cells
+        4. Must have significant intersection density
         """
-        # Get lines within the region (with some tolerance)
-        tolerance = 10
-        
-        # Filter horizontal lines in region
-        h_in_region = [
-            h for h in h_lines 
-            if (region.y0 - tolerance <= h[2] <= region.y1 + tolerance and
-                h[0] < region.x1 and h[1] > region.x0)
-        ]
-        
-        # Filter vertical lines in region
-        v_in_region = [
-            v for v in v_lines
-            if (region.x0 - tolerance <= v[0] <= region.x1 + tolerance and
-                v[1] < region.y1 and v[2] > region.y0)
-        ]
-        
-        # Need at least 4 horizontal and 3 vertical lines for a real table
-        if len(h_in_region) < 4 or len(v_in_region) < 3:
+        if len(h_lines) < 5 or len(v_lines) < 4:
             return False
         
-        # Check for actual intersections (grid pattern)
-        # Count how many vertical lines intersect with horizontal lines
+        tolerance = 5
+        
+        # Sort lines by position
+        h_sorted = sorted(h_lines, key=lambda x: x[2])  # Sort by y position
+        v_sorted = sorted(v_lines, key=lambda x: x[0])  # Sort by x position
+        
+        # Get the bounding region of potential table
+        h_y_positions = [h[2] for h in h_sorted]
+        v_x_positions = [v[0] for v in v_sorted]
+        
+        y_min, y_max = min(h_y_positions), max(h_y_positions)
+        x_min, x_max = min(v_x_positions), max(v_x_positions)
+        
+        table_width = x_max - x_min
+        table_height = y_max - y_min
+        
+        # Table must have reasonable dimensions (not just thin lines)
+        if table_width < 100 or table_height < 50:
+            return False
+        
+        # Check that horizontal lines actually span the table width
+        spanning_h_lines = 0
+        for h in h_sorted:
+            h_start, h_end, h_y = h
+            # Line should span at least 60% of table width
+            line_span = h_end - h_start
+            if line_span >= table_width * 0.6:
+                spanning_h_lines += 1
+        
+        # Check that vertical lines actually span the table height
+        spanning_v_lines = 0
+        for v in v_sorted:
+            v_x, v_start, v_end = v
+            # Line should span at least 50% of table height
+            line_span = v_end - v_start
+            if line_span >= table_height * 0.5:
+                spanning_v_lines += 1
+        
+        # Need at least 4 spanning horizontal lines and 3 spanning vertical lines
+        if spanning_h_lines < 4 or spanning_v_lines < 3:
+            return False
+        
+        # Count actual intersections (where lines cross)
         intersection_count = 0
-        for h in h_in_region:
-            h_y = h[2]
-            h_x_start, h_x_end = h[0], h[1]
-            
-            for v in v_in_region:
-                v_x = v[0]
-                v_y_start, v_y_end = v[1], v[2]
-                
+        for h in h_sorted:
+            h_start, h_end, h_y = h
+            for v in v_sorted:
+                v_x, v_start, v_end = v
                 # Check if lines intersect
-                if (h_x_start - tolerance <= v_x <= h_x_end + tolerance and
-                    v_y_start - tolerance <= h_y <= v_y_end + tolerance):
+                if (h_start - tolerance <= v_x <= h_end + tolerance and
+                    v_start - tolerance <= h_y <= v_end + tolerance):
                     intersection_count += 1
         
-        # A real table grid should have many intersections
-        # Minimum: (h_lines - 1) * (v_lines - 1) / 2 intersections
-        min_intersections = max(6, (len(h_in_region) - 1) * (len(v_in_region) - 1) // 3)
+        # A real table should have many intersections
+        # For a 4-row, 3-column table: expect ~12+ intersections
+        expected_intersections = (spanning_h_lines) * (spanning_v_lines)
+        actual_ratio = intersection_count / max(expected_intersections, 1)
         
-        return intersection_count >= min_intersections
+        # Need at least 70% of expected intersections
+        return actual_ratio >= 0.7 and intersection_count >= 12
 
     def _extract_lines(self, page: fitz.Page) -> Tuple[List, List]:
         """Extract horizontal and vertical lines from page drawings."""
