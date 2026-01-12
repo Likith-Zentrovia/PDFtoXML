@@ -739,7 +739,14 @@ class HybridConversionRouter:
         # Convert to DocBook XML
         if self.config.create_merged_xml:
             xml_path = output_dir / f"{pdf_path.stem}_hybrid_docbook42.xml"
-            self._convert_to_docbook(merged_content, xml_path, pdf_path.stem)
+            # Collect all extracted images from page results
+            all_images = []
+            for page_num in sorted(result.page_results.keys()):
+                page_result = result.page_results[page_num]
+                if page_result.images:
+                    all_images.extend(page_result.images)
+            
+            self._convert_to_docbook(merged_content, xml_path, pdf_path.stem, all_images)
             result.merged_xml_path = str(xml_path)
 
         # Collect failed pages
@@ -948,9 +955,12 @@ class HybridConversionRouter:
         self,
         markdown_content: str,
         output_path: Path,
-        title: str
+        title: str,
+        extracted_images: List[str] = None
     ) -> None:
         """Convert merged markdown to DocBook XML."""
+        extracted_images = extracted_images or []
+        
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"',
@@ -962,6 +972,9 @@ class HybridConversionRouter:
             '<chapter>',
             '  <title>Content</title>',
         ]
+        
+        # Track which images we've added
+        images_added = set()
 
         # Convert markdown paragraphs to DocBook
         paragraphs = markdown_content.split("\n\n")
@@ -991,13 +1004,24 @@ class HybridConversionRouter:
                 lines.append(f"  <sect3><title>{self._escape_xml(text)}</title></sect3>")
             elif para.startswith("<!-- IMAGE:"):
                 # Convert image marker to DocBook mediaobject
-                # Extract description from <!-- IMAGE: description -->
+                # Try to find an actual extracted image for this marker
                 desc_match = re.search(r'<!-- IMAGE:\s*(.+?)\s*-->', para)
-                if desc_match:
-                    desc = self._escape_xml(desc_match.group(1))
+                desc = desc_match.group(1) if desc_match else "Image"
+                desc = self._escape_xml(desc)
+                
+                # Find an unused extracted image
+                image_to_use = None
+                for img_path in extracted_images:
+                    if img_path not in images_added:
+                        image_to_use = img_path
+                        images_added.add(img_path)
+                        break
+                
+                if image_to_use:
+                    img_filename = Path(image_to_use).name
                     lines.append(f"  <mediaobject>")
                     lines.append(f"    <imageobject>")
-                    lines.append(f"      <imagedata fileref=\"MultiMedia/image.png\"/>")
+                    lines.append(f"      <imagedata fileref=\"MultiMedia/{img_filename}\"/>")
                     lines.append(f"    </imageobject>")
                     lines.append(f"    <textobject><phrase>{desc}</phrase></textobject>")
                     lines.append(f"  </mediaobject>")
@@ -1040,6 +1064,19 @@ class HybridConversionRouter:
                     lines.append(f"  <para>{text}</para>")
 
         if in_section:
+            lines.append("  </sect1>")
+
+        # Add any remaining extracted images that weren't matched to IMAGE markers
+        remaining_images = [img for img in extracted_images if img not in images_added]
+        if remaining_images:
+            lines.append("  <sect1><title>Images</title>")
+            for img_path in remaining_images:
+                img_filename = Path(img_path).name
+                lines.append(f"  <mediaobject>")
+                lines.append(f"    <imageobject>")
+                lines.append(f"      <imagedata fileref=\"MultiMedia/{img_filename}\"/>")
+                lines.append(f"    </imageobject>")
+                lines.append(f"  </mediaobject>")
             lines.append("  </sect1>")
 
         lines.extend([
