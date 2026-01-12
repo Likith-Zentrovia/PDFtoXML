@@ -101,19 +101,22 @@ class XMLToHTMLRenderer:
         for fontspec in root.iter('fontspec'):
             font_id = fontspec.get('id')
             if font_id:
-                family = fontspec.get('family', '')
-                face = fontspec.get('face', '')
+                family = fontspec.get('family', '') or ''
+                face = fontspec.get('face', '') or ''
                 # Use face if family is empty, or family otherwise
-                font_name = family or face
+                font_name = str(family or face or '')
+                
+                # Safely check for bold/italic in font name
+                font_name_lower = font_name.lower() if isinstance(font_name, str) else ''
 
                 lookup[font_id] = {
                     'family': font_name,
-                    'size': fontspec.get('size', ''),
-                    'color': fontspec.get('color', ''),
+                    'size': fontspec.get('size', '') or '',
+                    'color': fontspec.get('color', '') or '',
                     'face': face,
                     # Detect bold/italic from font name
-                    'bold': 'bold' in font_name.lower() if font_name else False,
-                    'italic': 'italic' in font_name.lower() or 'oblique' in font_name.lower() if font_name else False,
+                    'bold': 'bold' in font_name_lower if font_name_lower else False,
+                    'italic': ('italic' in font_name_lower or 'oblique' in font_name_lower) if font_name_lower else False,
                 }
 
         return lookup
@@ -210,7 +213,8 @@ class XMLToHTMLRenderer:
         elif elem.get('bold') == 'true' or elem.get('weight') == 'bold':
             is_bold = True
         elif fontspec_info and fontspec_info.get('family'):
-            is_bold = 'bold' in fontspec_info['family'].lower()
+            family = str(fontspec_info['family'] or '')
+            is_bold = 'bold' in family.lower() if family else False
 
         if is_bold:
             styles.append("font-weight: bold")
@@ -222,7 +226,9 @@ class XMLToHTMLRenderer:
         elif elem.get('italic') == 'true' or elem.get('style') == 'italic':
             is_italic = True
         elif fontspec_info and fontspec_info.get('family'):
-            is_italic = 'italic' in fontspec_info['family'].lower() or 'oblique' in fontspec_info['family'].lower()
+            family = str(fontspec_info['family'] or '')
+            family_lower = family.lower() if family else ''
+            is_italic = ('italic' in family_lower or 'oblique' in family_lower) if family_lower else False
 
         if is_italic:
             styles.append("font-style: italic")
@@ -241,9 +247,11 @@ class XMLToHTMLRenderer:
         # Role-based styling (emphasis role attribute)
         role = elem.get('role')
         if role:
-            if 'bold' in role.lower() and not is_bold:
+            role_str = str(role or '')
+            role_lower = role_str.lower() if role_str else ''
+            if role_lower and 'bold' in role_lower and not is_bold:
                 styles.append("font-weight: bold")
-            if 'italic' in role.lower() and not is_italic:
+            if role_lower and 'italic' in role_lower and not is_italic:
                 styles.append("font-style: italic")
 
         return '; '.join(styles) if styles else ''
@@ -382,12 +390,13 @@ class XMLToHTMLRenderer:
     def _render_emphasis(elem):
         """Render emphasis with font styling"""
         style_attr = XMLToHTMLRenderer._extract_font_style(elem)
-        role = elem.get('role', '')
-        lower = role.lower()
+        role = elem.get('role', '') or ''
+        role_str = str(role) if role else ''
+        lower = role_str.lower() if role_str else ''
 
         # Determine which styles to apply
-        is_bold = 'bold' in lower or 'strong' in lower
-        is_italic = 'italic' in lower
+        is_bold = ('bold' in lower or 'strong' in lower) if lower else False
+        is_italic = 'italic' in lower if lower else False
 
         style_html = f' style="{style_attr}"' if style_attr else ''
 
