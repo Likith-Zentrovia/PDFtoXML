@@ -76,6 +76,21 @@ class XMLToHTMLRenderer:
     _fontspec_lookup = {}
 
     @staticmethod
+    def _safe_tag_name(elem) -> str:
+        """Safely extract tag name from element, handling Cython/lxml compatibility."""
+        if elem is None:
+            return 'unknown'
+        raw_tag = elem.tag
+        if raw_tag is None:
+            return 'unknown'
+        # Convert to string in case it's a Cython method
+        tag_str = str(raw_tag) if not isinstance(raw_tag, str) else raw_tag
+        # Remove namespace prefix if present
+        if '}' in tag_str:
+            return tag_str.split('}')[-1]
+        return tag_str
+
+    @staticmethod
     def render(xml_content: str) -> str:
         """Render XML to HTML with proper formatting for tables, images, etc."""
         try:
@@ -259,7 +274,7 @@ class XMLToHTMLRenderer:
     @staticmethod
     def _element_to_html(elem, level=0) -> str:
         """Recursively convert XML element to HTML"""
-        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        tag = XMLToHTMLRenderer._safe_tag_name(elem)
         
         # Handle specific DocBook/RittDoc elements
         if tag == 'chapter':
@@ -593,7 +608,7 @@ class XMLToHTMLRenderer:
 
                         # Also handle other child elements
                         for child in cell:
-                            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                            child_tag = XMLToHTMLRenderer._safe_tag_name(child)
                             if child_tag != 'chunk':  # Already processed chunks
                                 cell_content += XMLToHTMLRenderer._element_to_html(child, 0)
 
@@ -607,13 +622,13 @@ class XMLToHTMLRenderer:
             else:
                 # Handle simple HTML-style table (no tgroup or rows)
                 for child in elem:
-                    child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                    child_tag = XMLToHTMLRenderer._safe_tag_name(child)
                     if child_tag == 'thead':
                         html += '<thead>'
                         for row in child.findall('.//{*}tr') or child.findall('.//tr'):
                             html += '<tr>'
                             for cell in row:
-                                cell_tag = cell.tag.split('}')[-1] if '}' in cell.tag else cell.tag
+                                cell_tag = XMLToHTMLRenderer._safe_tag_name(cell)
                                 if cell_tag in ['th', 'td']:
                                     style_attr = XMLToHTMLRenderer._extract_font_style(cell)
                                     style_html = f' style="{style_attr}"' if style_attr else ''
@@ -625,7 +640,7 @@ class XMLToHTMLRenderer:
                         for row in child.findall('.//{*}tr') or child.findall('.//tr'):
                             html += '<tr>'
                             for cell in row:
-                                cell_tag = cell.tag.split('}')[-1] if '}' in cell.tag else cell.tag
+                                cell_tag = XMLToHTMLRenderer._safe_tag_name(cell)
                                 if cell_tag in ['th', 'td']:
                                     style_attr = XMLToHTMLRenderer._extract_font_style(cell)
                                     style_html = f' style="{style_attr}"' if style_attr else ''
@@ -962,14 +977,15 @@ def html_to_xml(html_content: str) -> str:
 def html_element_to_xml(elem):
     """Convert an HTML element tree back to XML/DocBook structure"""
     
-    # Get tag name
-    tag = elem.tag
-    
-    if tag is None:
+    # Get tag name safely, handling Cython/lxml compatibility
+    raw_tag = elem.tag
+    if raw_tag is None:
         tag = 'div'
+    else:
+        tag = str(raw_tag) if not isinstance(raw_tag, str) else raw_tag
     
     # Convert line breaks immediately
-    if tag.lower() == 'br':
+    if tag and tag.lower() == 'br':
         return etree.Element('linebreak')
     
     # Map HTML tags back to DocBook tags
@@ -1316,7 +1332,10 @@ def api_page_mapping():
 
         def extract_page_info(elem, parent_page=None):
             nonlocal element_index
-            tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+            # Safely extract tag name, handling Cython/lxml compatibility
+            raw_tag = elem.tag if elem.tag is not None else ''
+            tag_str = str(raw_tag) if not isinstance(raw_tag, str) else raw_tag
+            tag = tag_str.split('}')[-1] if '}' in tag_str else tag_str
 
             # Extract page number from various sources
             page_num = None
@@ -1553,9 +1572,14 @@ def reprocess_pipeline():
 
         print(f"Creating package: {zip_path}")
 
+        # Safely extract root tag name, handling Cython/lxml compatibility
+        raw_root_tag = root.tag if root.tag is not None else 'book'
+        root_tag_str = str(raw_root_tag) if not isinstance(raw_root_tag, str) else raw_root_tag
+        root_name = root_tag_str.split('}', 1)[-1] if root_tag_str.startswith('{') else root_tag_str
+
         package_docbook(
             root=root,
-            root_name=(root.tag.split('}', 1)[-1] if root.tag.startswith('{') else root.tag),
+            root_name=root_name,
             dtd_system=BOOK_DOCTYPE_SYSTEM_DEFAULT,
             zip_path=str(zip_path),
             processing_instructions=[],
