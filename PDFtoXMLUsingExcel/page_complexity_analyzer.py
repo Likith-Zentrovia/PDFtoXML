@@ -368,28 +368,31 @@ class PageComplexityAnalyzer:
 
     def _analyze_tables(self, page: fitz.Page, complexity: PageComplexity, page_area: float) -> None:
         """
-        Analyze tables on the page using multiple detection methods:
-        1. Line-based detection (horizontal/vertical lines forming grids)
-        2. Text pattern detection (aligned text blocks in grid formation)
+        Analyze tables on the page - STRICT detection.
+
+        Only detects ACTUAL tables with visible grid lines/borders.
+        Multi-column text layouts are NOT tables.
         """
         # Method 1: Count lines that could form table borders
         h_lines, v_lines = self._extract_lines(page)
         complexity.line_count = len(h_lines) + len(v_lines)
 
-        # Method 2: Detect table-like structures from line intersections
+        # STRICT TABLE DETECTION: Only detect tables with clear grid patterns
+        # Requires BOTH horizontal AND vertical lines forming a grid
         table_regions = self._detect_table_regions_from_lines(h_lines, v_lines, page.rect)
 
-        # Method 3: Detect tables from text alignment patterns
-        text_tables = self._detect_tables_from_text(page)
-
-        # Combine detections (remove duplicates based on overlap)
-        all_tables = self._merge_table_detections(table_regions, text_tables, page.rect)
-        complexity.table_count = len(all_tables)
+        # Only count as table if we have a proper grid (not just aligned text)
+        # A real table needs at least 3 horizontal lines and 2 vertical lines
+        if len(h_lines) >= 3 and len(v_lines) >= 2:
+            complexity.table_count = len(table_regions)
+        else:
+            complexity.table_count = 0
 
         # Calculate table area coverage
-        total_table_area = sum(r.width * r.height for r in all_tables if r)
-        if page_area > 0:
-            complexity.table_area_pct = min(total_table_area / page_area, 1.0)
+        if complexity.table_count > 0:
+            total_table_area = sum(r.width * r.height for r in table_regions if r)
+            if page_area > 0:
+                complexity.table_area_pct = min(total_table_area / page_area, 1.0)
 
     def _extract_lines(self, page: fitz.Page) -> Tuple[List, List]:
         """Extract horizontal and vertical lines from page drawings."""
