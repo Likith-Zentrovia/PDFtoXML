@@ -1773,8 +1773,8 @@ def start_editor(pdf_path: Path, xml_path: Path, multimedia_folder: Path, dtd_pa
 
 def main():
     parser = argparse.ArgumentParser(description="RittDoc Web UI Editor")
-    parser.add_argument('pdf', help='PDF file path')
-    parser.add_argument('xml', help='Unified XML file path')
+    parser.add_argument('input', help='ZIP package path OR PDF file path')
+    parser.add_argument('xml', nargs='?', help='Unified XML file path (optional if ZIP provided)')
     parser.add_argument('--multimedia', help='Multimedia folder path')
     parser.add_argument('--dtd', default='RITTDOCdtd/v1.1/RittDocBook.dtd', help='DTD file path')
     parser.add_argument('--port', type=int, default=5000, help='Server port')
@@ -1783,78 +1783,161 @@ def main():
     parser.add_argument('--webhook-url', help='URL to call when save completes')
     parser.add_argument('--api-base-url', help='Base URL of PDF API server (for download URLs in webhooks)')
     parser.add_argument('--package-zip', help='Original ZIP package path (for repackaging after edits)')
+    parser.add_argument('--pdf', help='PDF file path (required when opening ZIP)')
 
     args = parser.parse_args()
     
-    pdf_path = Path(args.pdf)
-    xml_path = Path(args.xml)
+    input_path = Path(args.input)
     dtd_path = Path(args.dtd)
     
-    if not pdf_path.exists():
-        print(f"Error: PDF not found: {pdf_path}", file=sys.stderr)
-        sys.exit(1)
-    
-    if not xml_path.exists():
-        print(f"Error: XML not found: {xml_path}", file=sys.stderr)
-        sys.exit(1)
-    
-    # Auto-detect multimedia folder with multiple fallback strategies
-    # Use resolve() to get canonical path (handles case sensitivity on macOS)
-    if args.multimedia:
-        multimedia_folder = Path(args.multimedia).resolve()
-    else:
-        base = xml_path.stem
-        if base.endswith('_unified'):
-            base = base[:-8]
-        # Remove common suffixes to get PDF base name
-        for suffix in ['_docbook42', '_docbook', '_unified']:
-            if base.endswith(suffix):
-                base = base[:-len(suffix)]
+    # Check if input is a ZIP file
+    if input_path.suffix.lower() == '.zip' and input_path.exists():
+        print(f"Opening ZIP package: {input_path}")
+        
+        # Extract ZIP to temp directory
+        import tempfile
+        extract_dir = Path(tempfile.mkdtemp(prefix="rittdoc_edit_"))
+        print(f"Extracting to: {extract_dir}")
+        
+        with zipfile.ZipFile(input_path, 'r') as zf:
+            zf.extractall(extract_dir)
+        
+        # Find XML file in extracted content
+        xml_files = list(extract_dir.glob('*.xml')) + list(extract_dir.glob('*.XML'))
+        # Prefer Book.XML or unified XML
+        xml_path = None
+        for xf in xml_files:
+            if xf.name.lower() in ['book.xml', 'unified.xml']:
+                xml_path = xf
                 break
-        # Use resolved parent path
-        xml_parent = xml_path.parent.resolve()
-        multimedia_folder = xml_parent / f"{base}_MultiMedia"
-
-    if not multimedia_folder.exists():
-        # Try multiple naming patterns (case-insensitive search via multiple globs)
-        search_patterns = [
-            "*_MultiMedia",      # Standard pattern
-            "*_Multimedia",      # Mixed case
-            "*_multimedia",      # Lowercase
-            "*MultiMedia",       # Without underscore
-            "*Multimedia",       # Mixed case without underscore
-            "*multimedia",       # Lowercase without underscore
-            "_MultiMedia",       # Just prefix
-            "_Multimedia",       # Mixed case prefix
-            "_multimedia",       # Lowercase prefix
-            "MultiMedia",        # Plain name
-            "Multimedia",        # Mixed case plain
-            "multimedia",        # Lowercase plain
-        ]
-
-        found_folder = None
-        # Search in the resolved parent directory
-        search_dir = xml_path.parent.resolve()
-        for pattern in search_patterns:
-            matches = list(search_dir.glob(pattern))
-            # Filter to only directories
-            matches = [m for m in matches if m.is_dir()]
-            if matches:
-                found_folder = matches[0].resolve()
-                print(f"Found MultiMedia folder: {found_folder}")
-                break
-
-        if found_folder:
-            multimedia_folder = found_folder
+        if not xml_path and xml_files:
+            xml_path = xml_files[0]
+        
+        if not xml_path:
+            print(f"Error: No XML file found in ZIP package", file=sys.stderr)
+            sys.exit(1)
+        
+        print(f"Found XML: {xml_path.name}")
+        
+        # Find MultiMedia folder
+        multimedia_folder = extract_dir / "MultiMedia"
+        if not multimedia_folder.exists():
+            multimedia_folder = extract_dir / "multimedia"
+        if not multimedia_folder.exists():
+            # Create empty one
+            multimedia_folder = extract_dir / "MultiMedia"
+            multimedia_folder.mkdir(exist_ok=True)
+        
+        print(f"MultiMedia folder: {multimedia_folder}")
+        
+        # Find or require PDF
+        if args.pdf:
+            pdf_path = Path(args.pdf)
         else:
-            print(f"Warning: Multimedia folder not found. Tried multiple patterns in:")
-            print(f"  {search_dir}")
-            print("  Patterns: *_MultiMedia, *_Multimedia, *_multimedia, MultiMedia, etc.")
-            multimedia_folder = None
+            # Try to find PDF with same base name
+            base_name = input_path.stem
+            for suffix in ['_rittdoc', '_docbook', '_edited', '_hybrid_docbook42']:
+                if base_name.endswith(suffix):
+                    base_name = base_name[:-len(suffix)]
+                    break
+            
+            # Look for PDF in same directory as ZIP
+            possible_pdfs = [
+                input_path.parent / f"{base_name}.pdf",
+                input_path.parent / f"{base_name}.PDF",
+            ]
+            pdf_path = None
+            for pp in possible_pdfs:
+                if pp.exists():
+                    pdf_path = pp
+                    break
+            
+            if not pdf_path:
+                print(f"Warning: PDF not found. Looked for: {base_name}.pdf")
+                print(f"Use --pdf option to specify PDF path")
+                # Create a dummy reference - editor can still work without PDF preview
+                pdf_path = input_path.with_suffix('.pdf')
+        
+        # Set package_zip for repackaging
+        package_zip = str(input_path)
+        
     else:
-        # Resolve the path to canonical form
-        multimedia_folder = multimedia_folder.resolve()
-        print(f"Using MultiMedia folder: {multimedia_folder}")
+        # Traditional mode: PDF and XML as separate arguments
+        pdf_path = input_path
+        if not args.xml:
+            print("Error: XML path required when not using ZIP input", file=sys.stderr)
+            sys.exit(1)
+        xml_path = Path(args.xml)
+        package_zip = args.package_zip
+        multimedia_folder = None  # Will be auto-detected below
+    
+    # Validate paths for non-ZIP mode
+    if input_path.suffix.lower() != '.zip':
+        if not pdf_path.exists():
+            print(f"Error: PDF not found: {pdf_path}", file=sys.stderr)
+            sys.exit(1)
+        
+        if not xml_path.exists():
+            print(f"Error: XML not found: {xml_path}", file=sys.stderr)
+            sys.exit(1)
+    
+    # Auto-detect multimedia folder if not already set (from ZIP extraction)
+    if multimedia_folder is None:
+        if args.multimedia:
+            multimedia_folder = Path(args.multimedia).resolve()
+        else:
+            base = xml_path.stem
+            if base.endswith('_unified'):
+                base = base[:-8]
+            # Remove common suffixes to get PDF base name
+            for suffix in ['_docbook42', '_docbook', '_unified', '_hybrid_docbook42']:
+                if base.endswith(suffix):
+                    base = base[:-len(suffix)]
+                    break
+            # Use resolved parent path
+            xml_parent = xml_path.parent.resolve()
+            multimedia_folder = xml_parent / f"{base}_MultiMedia"
+
+        if not multimedia_folder.exists():
+            # Try multiple naming patterns (case-insensitive search via multiple globs)
+            search_patterns = [
+                "*_MultiMedia",      # Standard pattern
+                "*_Multimedia",      # Mixed case
+                "*_multimedia",      # Lowercase
+                "*MultiMedia",       # Without underscore
+                "*Multimedia",       # Mixed case without underscore
+                "*multimedia",       # Lowercase without underscore
+                "_MultiMedia",       # Just prefix
+                "_Multimedia",       # Mixed case prefix
+                "_multimedia",       # Lowercase prefix
+                "MultiMedia",        # Plain name
+                "Multimedia",        # Mixed case plain
+                "multimedia",        # Lowercase plain
+            ]
+
+            found_folder = None
+            # Search in the resolved parent directory
+            search_dir = xml_path.parent.resolve()
+            for pattern in search_patterns:
+                matches = list(search_dir.glob(pattern))
+                # Filter to only directories
+                matches = [m for m in matches if m.is_dir()]
+                if matches:
+                    found_folder = matches[0].resolve()
+                    print(f"Found MultiMedia folder: {found_folder}")
+                    break
+
+            if found_folder:
+                multimedia_folder = found_folder
+            else:
+                print(f"Warning: Multimedia folder not found. Tried multiple patterns in:")
+                print(f"  {search_dir}")
+                print("  Patterns: *_MultiMedia, *_Multimedia, *_multimedia, MultiMedia, etc.")
+                multimedia_folder = None
+        else:
+            # Resolve the path to canonical form
+            multimedia_folder = multimedia_folder.resolve()
+            print(f"Using MultiMedia folder: {multimedia_folder}")
 
     start_editor(
         pdf_path, xml_path, multimedia_folder, dtd_path, args.port,
@@ -1862,7 +1945,7 @@ def main():
         job_id=args.job_id,
         webhook_url=args.webhook_url,
         api_base_url=args.api_base_url,
-        package_zip=args.package_zip
+        package_zip=package_zip
     )
 
 
