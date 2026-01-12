@@ -257,6 +257,13 @@ CONVERSION_CONFIG_OPTIONS = {
         "required": False,
         "default": True,
     },
+    "use_hybrid": {
+        "label": "Hybrid Conversion Mode",
+        "description": "Route complex pages (with tables/images) to AI pipeline, simple text-only pages to faster non-AI pipeline. Recommended for most documents.",
+        "type": "checkbox",
+        "required": False,
+        "default": True,
+    },
 }
 
 
@@ -285,6 +292,7 @@ class ConversionConfig:
     create_rittdoc: bool = True
     skip_extraction: bool = False
     include_toc: bool = True
+    use_hybrid: bool = True  # Enable hybrid mode by default for optimal performance
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API calls."""
@@ -310,7 +318,7 @@ class ConversionConfig:
             data["toc_depth"] = int(data["toc_depth"])
 
         # Handle boolean conversions from form data
-        bool_fields = ["create_docx", "create_rittdoc", "skip_extraction", "include_toc"]
+        bool_fields = ["create_docx", "create_rittdoc", "skip_extraction", "include_toc", "use_hybrid"]
         for field in bool_fields:
             if field in data and isinstance(data[field], str):
                 data[field] = data[field].lower() in ("true", "1", "yes", "on")
@@ -428,6 +436,11 @@ CONVERSION_CONFIG_JSON_SCHEMA = {
             "default": True,
             "description": "Include table of contents",
         },
+        "use_hybrid": {
+            "type": "boolean",
+            "default": True,
+            "description": "Enable hybrid mode: route complex pages (tables/images) to AI, simple pages to non-AI",
+        },
     },
     "additionalProperties": False,
 }
@@ -487,6 +500,7 @@ export interface ConversionConfig {
   create_rittdoc: boolean;
   skip_extraction: boolean;
   include_toc: boolean;
+  use_hybrid: boolean;
 }
 
 export const DEFAULT_CONVERSION_CONFIG: ConversionConfig = {
@@ -500,6 +514,7 @@ export const DEFAULT_CONVERSION_CONFIG: ConversionConfig = {
   create_rittdoc: true,
   skip_extraction: false,
   include_toc: true,
+  use_hybrid: true,
 };
 
 export interface ConfigOption {
