@@ -180,8 +180,6 @@ Regular paragraph text...
 1. Numbered items
 
 Output ONLY the extracted content, no explanations.
-
-<!-- Page {PAGE_NUMBER} -->
 """
 
 
@@ -249,7 +247,7 @@ class NonAIPageConverter:
 
     def _extract_text_with_formatting(self, page: fitz.Page, page_num: int) -> str:
         """Extract text from page - clean text without markdown artifacts."""
-        lines = [f"<!-- Page {page_num} -->", ""]
+        lines = []
 
         # Get text as dictionary for detailed information
         text_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
@@ -991,9 +989,21 @@ class HybridConversionRouter:
             elif para.startswith("### "):
                 text = re.sub(r'\s*<!--.*?-->\s*', '', para[4:]).strip()
                 lines.append(f"  <sect3><title>{self._escape_xml(text)}</title></sect3>")
+            elif para.startswith("<!-- IMAGE:"):
+                # Convert image marker to DocBook mediaobject
+                # Extract description from <!-- IMAGE: description -->
+                desc_match = re.search(r'<!-- IMAGE:\s*(.+?)\s*-->', para)
+                if desc_match:
+                    desc = self._escape_xml(desc_match.group(1))
+                    lines.append(f"  <mediaobject>")
+                    lines.append(f"    <imageobject>")
+                    lines.append(f"      <imagedata fileref=\"MultiMedia/image.png\"/>")
+                    lines.append(f"    </imageobject>")
+                    lines.append(f"    <textobject><phrase>{desc}</phrase></textobject>")
+                    lines.append(f"  </mediaobject>")
             elif para.startswith("<!-- TABLE"):
-                # Pass through table markers
-                lines.append(f"  {para}")
+                # Skip internal table markers (tables should be in HTML format)
+                continue
             elif "<table" in para.lower():
                 # Pass through HTML tables
                 lines.append(f"  {para}")
